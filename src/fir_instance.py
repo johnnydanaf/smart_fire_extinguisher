@@ -5,6 +5,7 @@ from dataclasses import dataclass, field, asdict
 from typing import Optional
 import numpy as np
 
+# do actual wrappers why not
 
 # Weights for danger_level computation — tune these after testing
 ALPHA = 0.5   # frame_area_ratio weight
@@ -13,7 +14,7 @@ GAMMA = 0.2   # max heat matrix weight
 
 
 @dataclass
-class FireEvent:
+class FireInstance:
     """
     One snapshot of a fire detection event.
     Built from YOLO output + IoT sensor data.
@@ -25,6 +26,10 @@ class FireEvent:
         LOCKED → 1 event / sec  (fire confirmed, full pipeline on)
     """
 
+    # ai cam
+    # images
+
+    
     # --- YOLO outputs ---
     bbox_x: float               # bounding box centre x [0–1]
     bbox_y: float               # bounding box centre y [0–1]
@@ -36,7 +41,9 @@ class FireEvent:
     # --- IoT sensor data ---
     heat_matrix: list           # 2D list of floats from heat matrix sensor
     smoke_level: float          # optical smoke sensor reading (ppm)
-    lidar_z: float              # depth estimate in metres from LiDAR
+    lidar_z: float              # depth estimate in metres from LiDAR4
+
+    # --- Normalised ratios ---
 
     # --- Computed on creation ---
     timestamp: datetime = field(default_factory=datetime.now)
