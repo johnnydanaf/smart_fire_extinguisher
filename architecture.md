@@ -324,6 +324,11 @@ The SEE layer is responsible for all computer vision processing. It is powered o
 
 The IMX500 camera module performs inference on-chip using pre-loaded `.rpk` model packages. Two models run in parallel on each captured frame: a YOLO-based fire detector and a scene classifier for background awareness.
 
+FireDetector — uses a fine-tuned YOLO model (.rpk package loaded to the IMX500 chip) trained specifically on fire detection. Jana is training this now. Output is bounding boxes with confidence scores.
+
+SceneClassifier — uses MobileNetV3 as the backbone, loaded as a .rpk package to the same IMX500 chip. It classifies the background scene (kitchen, warehouse, server room, etc.) to give THINK context about the environment the fire is in.
+
+
 ### 5.1 Flowchart
 
 ![SEE layer — process flowchart](assets/flowchart_see.png)
