@@ -526,6 +526,10 @@ A small LSTM or 1D-CNN operating over the chain sequence directly, capturing the
 
 All three implement the same `BaseModel(ABC)` interface. Swapping from phase 1 to phase 2 is done by changing one line in `config.json` and triggering a retrain from the website.
 
+**Phase 4 — ModelEvaluator** (planned, not yet defined)
+A ModelEvaluator class is planned as an offline diagnostic tool that runs against exported validated data from ThinkDatabase. It will benchmark model implementations against each other before any model is promoted to the live system on the Pi. It lives at think/ml/evaluator.py and is never imported by the live pipeline.
+Design is pending and will be defined once sufficient validated training data exists to make evaluation meaningful.
+
 ### 6.6 Feature vector
 
 `FeatureBuilder` takes a `ThinkSnapshot` plus its event chain and flattens everything into a single dictionary of floats that the model can consume directly. The `ThinkSnapshot` stores human-readable structured data. The feature vector is the model's flat numeric representation of the same information.
