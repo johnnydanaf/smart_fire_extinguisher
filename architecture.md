@@ -80,9 +80,9 @@ A strict ownership rule applies: each field in `SystemState` has exactly one wri
 | `sensor_triggered` | bool | SensorFuser | VisionFuser, ArmController, ThinkEngine |
 | `sensor_readings` | Dict[str, float] | SensorFuser | ThinkEngine |
 | `active_faults` | List[str] | SensorFuser | NotificationService |
+| `heat_matrix_hotspot` | Tuple[float, float] | SensorFuser | ArmController |
 | `fire_detected` | bool | VisionFuser | ThinkEngine, ActEngine |
 | `fire_area_ratio` | float | VisionFuser | ThinkEngine |
-| `heat_matrix_hotspot` | Tuple[float, float] | VisionFuser | ArmController |
 | `camera_active` | bool | VisionFuser | SystemOrchestrator |
 | `arm_angles` | List[float] | ArmController | ActEngine |
 | `arm_locked` | bool | ActEngine | ArmController |
