@@ -1,9 +1,9 @@
 # Fire Detection and Response System — Architecture
 
 **Version:** 0.1 (research prototype)  
-**Status:** Architecture phase — implementation pending  
+**Status:** Implementation in progress  
 **Author:** Maya Fakih  
-**Database:** PostgreSQL (preferred) or MySQL — decision pending based on deployment constraints
+**Database:** PostgreSQL — JSONB columns handle variable sensor configurations so schema stays fixed regardless of hardware setup.
 
 ---
 
@@ -61,7 +61,8 @@ SENSE  ──►  SEE  ──►  THINK  ──►  ACT
 
 The `SystemOrchestrator` is the entry point of the entire system. It is responsible for:
 
-- Building the `SystemState` shared object at boot
+- Reading `config.json` at boot and extracting `system_mode`
+- Creating the `multiprocessing.Manager` and constructing `SystemState`
 - Instantiating all four layer components and passing them a reference to `SystemState`
 - Calling `start()` on each component, which causes each to spawn its own operating system process
 - Accepting mode change requests from the website and writing them to `SystemState`
@@ -69,30 +70,35 @@ The `SystemOrchestrator` is the entry point of the entire system. It is responsi
 
 The orchestrator does not manage the internal logic of any layer. It is a boot manager and a mode switcher. Each layer is self-managing: it reads `SystemState` in its own loop and decides independently whether to activate or deactivate based on the fields it watches.
 
+Each layer that needs the database creates its own connection directly. SystemState does not mediate database access.
+
 ### 3.2 SystemState — the shared blackboard
 
-`SystemState` is a managed shared object (using `multiprocessing.Manager().dict()`) that all processes can read and write. It is not a message queue — it is a live snapshot of the world as each layer currently sees it.
+**Design decision (day 6):** SystemState carries control signals only. Data travels between layers through typed snapshots in queues. Fields that belong to a single layer stay in that layer — they are not mirrored into SystemState.
+
+`SystemState` wraps a `multiprocessing.Manager().dict()` so all OS processes share the same live values through the Manager server process. It also owns the three inter-layer queues.
 
 A strict ownership rule applies: each field in `SystemState` has exactly one writer. No two processes write to the same field. This eliminates the need for mutexes and makes the concurrency model simple and deadlock-free.
 
 | Field | Type | Written by | Read by |
 |-------|------|-----------|---------|
-| `sensor_triggered` | bool | SensorFuser | VisionFuser, ArmController, ThinkEngine |
-| `sensor_readings` | Dict[str, float] | SensorFuser | ThinkEngine |
-| `active_faults` | List[str] | SensorFuser | NotificationService |
-| `fire_detected` | bool | VisionFuser | ThinkEngine, ActEngine |
-| `fire_area_ratio` | float | VisionFuser | ThinkEngine |
-| `heat_matrix_hotspot` | Tuple[float, float] | VisionFuser | ArmController |
-| `camera_active` | bool | VisionFuser | SystemOrchestrator |
-| `arm_angles` | List[float] | ArmController | ActEngine |
-| `arm_locked` | bool | ActEngine | ArmController |
-| `danger_level` | int | ThinkEngine | ActEngine |
-| `recommended_action` | str | ThinkEngine | ActEngine |
-| `latest_think_snapshot_id` | int | ThinkEngine | ActEngine |
-| `system_mode` | str | SystemOrchestrator | ActEngine, all ActMode subclasses |
-| `suppression_active` | bool | ActEngine | ArmController |
-| `alarm_active` | bool | ActEngine | NotificationService |
-| `system_running` | bool | SystemOrchestrator | all layers |
+| `sensor_triggered` | bool | SensorFuser | VisionFuser (wake-up signal) |
+| `active_sensor_count` | int | SensorFuser | Orchestrator, NotificationService |
+| `faulted_sensors` | List[str] | SensorFuser | NotificationService |
+| `system_mode` | str | SystemOrchestrator | All layers |
+| `system_running` | bool | SystemOrchestrator | All layers |
+| `sense_running` | bool | SensorFuser | Orchestrator |
+| `see_running` | bool | VisionFuser | Orchestrator |
+| `think_running` | bool | ThinkEngine | Orchestrator |
+| `act_running` | bool | ActEngine | Orchestrator |
+
+**Queues** — owned by SystemState, created at boot, never change:
+
+| Queue | From | To |
+|-------|------|----|
+| `sense_queue` | SensorFuser | ThinkEngine |
+| `see_queue` | VisionFuser | ThinkEngine |
+| `think_queue` | ThinkEngine | ActEngine |
 
 ### 3.3 Process activation rules
 
@@ -100,11 +106,10 @@ Each layer watches its own relevant `SystemState` fields and activates or deacti
 
 | Process | Activates when | Deactivates when |
 |---------|---------------|-----------------|
-| SensorFuser | always on from boot | system shutdown |
+| SensorFuser | always on from boot | `system_running = False` |
 | VisionFuser | `sensor_triggered = True` | `sensor_triggered = False` |
-| ArmController | `sensor_triggered = True` | `sensor_triggered = False` |
-| ThinkEngine | `fire_detected = True` | `fire_detected = False` |
-| ActEngine | `danger_level >= config.threshold` | `danger_level < threshold` for `clear_delay_s` |
+| ThinkEngine | `sensor_triggered = True` AND snapshots available in queues | `sensor_triggered = False` |
+| ActEngine | ThinkSnapshot received in `think_queue` | `system_running = False` |
 
 ### 3.4 Orchestrator flowchart
 
@@ -152,7 +157,7 @@ Every sensor type (ADC, I2C, UART, GPIO) inherits from a common abstract base cl
 
 `SensorParser` reads `config.json` at startup and constructs the correct concrete sensor subclass for each entry. This is the only place in the codebase where sensor types are branched on. After construction, all sensors are treated polymorphically.
 
-Each sensor runs in its own operating system process, polling at the configured interval. The `SensorFuser` collects readings across all sensors and evaluates whether any threshold has been crossed. If one has, it assembles a `SensorSnapshot` and writes `sensor_triggered = True` to `SystemState`, which wakes the SEE layer.
+Each sensor runs in its own thread inside the SensorFuser process, polling at the configured interval. The `SensorFuser` collects readings across all sensors and evaluates whether any threshold has been crossed. If one has, it assembles a `SensorSnapshot`, puts it in `sense_queue`, and writes `sensor_triggered = True` to `SystemState`, which wakes the SEE layer.
 
 ### 4.4 Fault handling
 
@@ -161,9 +166,10 @@ When a sensor produces an invalid reading (outside its configured `valid_min` / 
 1. The sensor retries up to `max_retries` times (configured per sensor in `config.json`)
 2. On each retry failure, the fault counter increments
 3. If retries are exhausted, the sensor sets `fault = True` and removes itself from the active pool
-4. `NotificationService` is called immediately — email to admin, popup notification on website, persistent entry in the notification tab
-5. `SensorFuser` continues operating with the remaining healthy sensors
-6. The admin can re-enable the sensor from the website once the hardware issue is resolved
+4. SensorFuser updates `faulted_sensors` and `active_sensor_count` in SystemState
+5. `NotificationService` is called immediately — email to admin, popup notification on website, persistent entry in the notification tab
+6. `SensorFuser` continues operating with the remaining healthy sensors
+7. The admin can re-enable the sensor from the website once the hardware issue is resolved
 
 The system is designed to be tolerant of individual sensor failures because multiple sensor types are used in combination. The fire detection logic still functions correctly with a subset of sensors active.
 
@@ -323,6 +329,10 @@ GPIOSensor       ── inherits ───────────►  Sensor (A
 The SEE layer is responsible for all computer vision processing. It is powered off when sensors are below threshold and activates explicitly when `SensorFuser` writes `sensor_triggered = True` to `SystemState`. The camera and all vision models are loaded only when needed, which reduces power consumption and extends hardware lifespan.
 
 The IMX500 camera module performs inference on-chip using pre-loaded `.rpk` model packages. Two models run in parallel on each captured frame: a YOLO-based fire detector and a scene classifier for background awareness.
+
+FireDetector — uses a fine-tuned YOLO model (.rpk package loaded to the IMX500 chip) trained specifically on fire detection. Jana is training this now. Output is bounding boxes with confidence scores.
+
+SceneClassifier — uses MobileNetV3 as the backbone, loaded as a .rpk package to the same IMX500 chip. It classifies the background scene (kitchen, warehouse, server room, etc.) to give THINK context about the environment the fire is in.
 
 ### 5.1 Flowchart
 
@@ -525,6 +535,9 @@ An `XGBClassifier` trained on validated `ThinkSnapshot` rows. Predicts both `dan
 A small LSTM or 1D-CNN operating over the chain sequence directly, capturing the shape of how readings evolve over time rather than just their current statistics.
 
 All three implement the same `BaseModel(ABC)` interface. Swapping from phase 1 to phase 2 is done by changing one line in `config.json` and triggering a retrain from the website.
+
+**Phase 4 — ModelEvaluator** (planned, not yet defined)  
+A ModelEvaluator class is planned as an offline diagnostic tool that runs against exported validated data from ThinkDatabase. It will benchmark model implementations against each other before any model is promoted to the live system on the Pi. It lives at `think/ml/evaluator.py` and is never imported by the live pipeline. Design is pending and will be defined once sufficient validated training data exists to make evaluation meaningful.
 
 ### 6.6 Feature vector
 
@@ -776,9 +789,7 @@ After the full THINK pipeline runs, the system displays its prediction (danger l
 
 ### 7.5 2-DOF arm and IK
 
-The robotic arm carries the camera, heat matrix sensor, and water pump at its tip. When the camera is active, the arm runs a continuous tracking loop, reading `heat_matrix_hotspot` from `SystemState` and moving to keep the highest-temperature region centred in its field of view. This provides the YOLO model with consistently framed fire detections.
-
-When ACT decides to suppress, it sets `arm_locked = True` in `SystemState`. The `ArmController` process reads this flag and freezes the arm on its current target. The pump then fires. When suppression ends, `arm_locked = False` and tracking resumes.
+The robotic arm carries the camera, heat matrix sensor, and water pump at its tip. When the camera is active, the arm runs a continuous tracking loop reading from the heat matrix sensor and moving to keep the highest-temperature region centred in its field of view. This provides the YOLO model with consistently framed fire detections.
 
 The inverse kinematics solver (`DHSolver`) uses Denavit-Hartenberg parameters loaded from `config.json` to compute joint angles from a physical target coordinate. The 2-DOF geometric solution is implemented directly. For configurations with more than 2 degrees of freedom, `DHSolver.solve()` raises `NotImplementedError` — the architecture is designed for future extension but only the 2-DOF case is handled in this version.
 
@@ -802,7 +813,7 @@ Two solutions exist (elbow up / elbow down). The solver selects the one within t
 
 ### 7.6 Notification service
 
-`NotificationService` is a shared utility that lives in `common/` and is used by both the SENSE layer (sensor fault notifications) and the ACT layer (fire event notifications). It is not owned by either layer. Both receive a reference to the same instance at construction time from the `SystemOrchestrator`.
+`NotificationService` is a shared utility that lives in `notify/` and is used by both the SENSE layer (sensor fault notifications) and the ACT layer (fire event notifications). It is not owned by either layer. Both receive a reference to the same instance at construction time from the `SystemOrchestrator`.
 
 Notifications take three forms: email (with dynamic content and action links), website popup (ephemeral, dismissable), and notification tab entry (persistent, remains visible until cleared by the admin).
 
@@ -822,8 +833,8 @@ methods:
 ```
 methods:
   run(snapshot, actuators, notifier) → None
-    arm already aimed by ArmController, fires pump immediately,
-    triggers alarm, sends report email, logs to DB
+    fires pump immediately, triggers alarm,
+    sends report email, logs to DB
 ```
 
 **CopilotMode(ActMode)**
@@ -860,11 +871,9 @@ fields:
   _notifier: NotificationService
   _db: ThinkDatabase
   _running: bool
-  _processes: List[Process]
 
 methods:
   __init__(config_path: str, state: SystemState,
-           db: ThinkDatabase,
            notifier: NotificationService) → None
   start() → None
   stop() → None
@@ -971,7 +980,7 @@ methods:
   _build_arm(entry: dict) → ArmController
 ```
 
-**NotificationService (common/)**
+**NotificationService**
 ```
 fields:
   admin_email: str
@@ -994,7 +1003,7 @@ ActMode (ABC)    ◄── inherits ──  AutopilotMode
 ActMode (ABC)    ◄── inherits ──  CopilotMode
 ActMode (ABC)    ◄── inherits ──  SurveillanceMode
 ActMode (ABC)    ◄── inherits ──  TrainingMode
-ActEngine        ──◆ owns ──────► ActuatorController
+ActEngine        ──◆ owns ──────► List[Actuator]
 ActEngine        ──◆ owns ──────► NotificationService
 ActEngine        ── uses ────────► ActMode (swappable at runtime)
 ActEngine        ── uses ────────► ThinkDatabase (updates rows)
@@ -1080,6 +1089,8 @@ ActuatorParser   ── creates ────► List[Actuator] (factory at init)
 
 A single table holds the complete lifecycle of every event the system observes. THINK creates a row. ACT updates it. Outcome is written when the event resolves. Human validators write the training columns.
 
+JSONB columns (`sensor_readings`, `sensor_normalized`, `raw_detections`) handle variable hardware configurations — a deployment with 2 sensors or 10 sensors uses the same schema without changes.
+
 ```sql
 CREATE TABLE think_snapshots (
   id                       SERIAL PRIMARY KEY,
@@ -1126,8 +1137,6 @@ CREATE TABLE think_snapshots (
 );
 ```
 
-Structured and frequently queried fields (timestamps, danger levels, validated flag) are plain columns. Nested flexible data (sensor readings dict, raw detections list) are stored as JSONB so the schema does not need to change when new sensor types are added.
-
 **Admin controls (website):**
 - Export all rows to CSV for offline training
 - Clear logs after export
@@ -1139,7 +1148,7 @@ Structured and frequently queried fields (timestamps, danger levels, validated f
 
 ## 9. Configuration Reference
 
-All system behaviour is controlled through a single `config.json` file at the project root. No hardcoded thresholds exist in the codebase.
+All system behaviour is controlled through a single `config.json` file at the project root. No hardcoded thresholds exist in the codebase. Each layer reads the config file directly at boot — config is not passed through SystemState.
 
 Key design decisions that belong in config:
 
@@ -1162,7 +1171,7 @@ These are the data contracts between layers. Each person building a layer needs 
 
 ### SENSE output contract
 
-`SensorSnapshot` emitted to `Queue[SensorSnapshot]`:
+`SensorSnapshot` emitted to `SystemState.sense_queue`:
 
 ```python
 @dataclass
@@ -1176,7 +1185,7 @@ class SensorSnapshot:
 
 ### SEE output contract
 
-`VisionSnapshot` emitted to `Queue[VisionSnapshot]`:
+`VisionSnapshot` emitted to `SystemState.see_queue`:
 
 ```python
 @dataclass
@@ -1201,15 +1210,15 @@ class Detection:
 
 ### THINK output contract
 
-`ThinkSnapshot` emitted to `Queue[ThinkSnapshot]` (includes all fields, training fields are None until validated):
+`ThinkSnapshot` emitted to `SystemState.think_queue` (includes all fields, training fields are None until validated).
 
 The full field list is defined in section 6.7.
 
 ### ACT → DB update contract
 
-ACT calls `ThinkDatabase.update_act(id, mode, action)` and later `ThinkDatabase.update_outcome(id, label, source)` on the same row that THINK created. The `id` is read from `SystemState.latest_think_snapshot_id`.
+ACT calls `ThinkDatabase.update_act(id, mode, action)` and later `ThinkDatabase.update_outcome(id, label, source)` on the same row that THINK created. The `id` comes from the ThinkSnapshot pulled from `think_queue`.
 
 ---
 
-*Last updated: April 2026*  
-*Architecture version: 0.1 — research prototype*
+*Last updated: April 2026 — day 6*  
+*Architecture version: 0.2 — implementation in progress*
