@@ -19,6 +19,7 @@
 8. [Database Schema](#8-database-schema)
 9. [Configuration Reference](#9-configuration-reference)
 10. [Integration Contracts](#10-integration-contracts)
+11. [Future Plans](#11-future-plans)
 
 ---
 
@@ -27,6 +28,8 @@
 This system is a multi-layer intelligent fire detection and response platform designed for embedded deployment on a Raspberry Pi with attached sensors, camera module, and a 2-DOF robotic arm. It is capable of detecting fire using both physical sensors and computer vision, reasoning about the severity and growth rate of a detected event, and dispatching appropriate responses ranging from notification to physical suppression — all while continuously learning from human feedback to improve its decision-making over time.
 
 The system is designed to be context-aware. Thresholds, actuator mappings, action spaces, and operating modes are all configurable through a single `config.json` file, allowing the same codebase to be deployed in a data centre (where any heat anomaly is critical) or a wildfire monitoring site (where much higher tolerances apply) without code changes.
+
+The system is designed to be deployment-agnostic. It has no assumptions about its physical platform — it only knows what it sees through its camera and what its sensors report. Whether it is mounted on a fixed wall, a robotic arm, or a drone, the pipeline is identical. Physical platform awareness (spatial coordinates, movement, encoder feedback) is a future extension, not a core dependency.
 
 The architecture is divided into four logical processing layers that run as independent operating system processes, coordinated through a shared state object managed by a `SystemOrchestrator`.
 
@@ -348,7 +351,15 @@ SceneClassifier — uses MobileNetV3 as the backbone, loaded as a .rpk package t
 
 `VisionFuser` owns the camera, both models, and the output queue. It runs a continuous capture loop while active, feeding each frame through both models in parallel, and assembling the results into a `VisionSnapshot`.
 
+`FireDetector.parse_detections()` processes the raw YOLO output externally — no YOLO internals are accessed. For each detected box it reads the class index, maps it to a label name via `results[0].names`, and reads the winning confidence score. All box data is then grouped by label and passed to the cluster builder.
+
+The clustering algorithm groups spatially proximate fire and smoke boxes into `FireCluster` objects. Boxes are considered part of the same cluster if their centroids are within a configurable proximity threshold. Each cluster captures the union of its fire and smoke boxes, computes the predicted fire origin as the centroid of that union, and identifies the primary detection as the highest-danger box (ranked by `primary_confidence × total_area_ratio`). Clusters are sorted descending by the same danger score — index 0 is always the most dangerous.
+
 The `human_near_fire` field on `VisionSnapshot` is derived, not directly from a model. It is computed by checking whether any detection in `raw_detections` has a label in the configured `human_labels` list while `fire_detected` is also true.
+
+The `composite_label` field is a string enum constructed by `FireDetector` from the cluster list: `"fire-smoke"` if the dominant cluster has both, `"fire"` if fire only, `"smoke"` if smoke only, `"none"` if no clusters. This string is used directly in human-facing notifications. `FeatureBuilder` encodes it to an integer for XGBoost.
+
+A reference to the captured frame image is stored as `frame_image_url` in the snapshot. The image itself is saved to the configured storage backend (local filesystem path, Google Drive, S3, or any URL-addressable store). The system only stores the URL — it does not care where the image lives. This reference is included in all human notifications so the recipient can see exactly what the camera captured at the moment of detection.
 
 ### 5.4 Class definitions
 
@@ -362,7 +373,14 @@ methods: load() → None  [abstract]
 ```
 methods:
   load() → None
-  parse_detections() → List[Detection]
+  parse_detections(results) → Tuple[List[Detection], List[FireCluster]]
+    reads results[0].boxes externally — no YOLO internals accessed
+    groups boxes by label, builds clusters, sorts by danger score
+  _build_clusters(detections: List[Detection]) → List[FireCluster]
+    proximity-based grouping of fire and smoke boxes
+    computes union areas (overlap-corrected), origin centroid, danger score
+  _danger_score(cluster: FireCluster) → float
+    primary_confidence × total_area_ratio
 ```
 
 **SceneClassifier(VisionModel)**
@@ -390,6 +408,7 @@ fields:
 methods:
   start() → None      powers on, loads .rpk packages to chip
   stop() → None       powers off completely
+  capture_frame() → Any
   parse_fire_detections() → List[Detection]
   parse_scene_result() → Tuple[str, float]
 ```
@@ -399,22 +418,69 @@ methods:
 fields:
   label: str
   confidence: float
-  bbox: Tuple[int, int, int, int]    x, y, w, h
+  bbox: Tuple[int, int, int, int]    x, y, w, h in pixels
   area_ratio: float
+```
+
+**FireCluster (dataclass)**
+```
+fields:
+  cluster_id: int
+  origin_x: float                    centroid x of fire+smoke union bbox
+  origin_y: float                    centroid y of fire+smoke union bbox
+  total_area_ratio: float            union of all boxes in cluster / frame area
+  fire_area_ratio: float             fire boxes union only / frame area
+  smoke_area_ratio: float            smoke boxes union only / frame area
+  primary_label: str                 label of highest danger-score box
+  primary_confidence: float
+  primary_bbox: Tuple[int,int,int,int]
+  box_count: int                     total boxes grouped into this cluster
+  has_fire: bool
+  has_smoke: bool
+
+note:
+  danger_score = primary_confidence × total_area_ratio
+  clusters are sorted descending by danger_score
+  cluster index 0 is always the most dangerous
+  serialises to JSONB in the database
 ```
 
 **VisionSnapshot (dataclass)**
 ```
 fields:
   timestamp: float
-  fire_detected: bool
-  fire_count: int
-  fire_area_ratio: float
-  fire_confidence: float
-  scene_label: str
+
+  --- scene classifier ---
+  scene_label: str                   from labels.json scene_labels
   scene_confidence: float
-  human_near_fire: bool              derived field
-  raw_detections: List[Detection]
+
+  --- composite assessment ---
+  composite_label: str               "fire-smoke" | "fire" | "smoke" | "none"
+                                     human-readable, used directly in notifications
+                                     FeatureBuilder encodes to int for XGBoost
+  glimpsed_fire: bool                True if any fire box existed, even below threshold
+  human_near_fire: bool              derived: fire detected AND human label present
+
+  --- frame-level totals ---
+  fire_count: int                    boxes above threshold
+  smoke_count: int                   boxes above threshold
+  fire_union_area: float             overlap-corrected union of all fire boxes
+  smoke_union_area: float            overlap-corrected union of all smoke boxes
+
+  --- clusters ---
+  cluster_count: int
+  dominant_cluster_idx: int          always 0 — highest danger_score cluster
+  fire_clusters: List[FireCluster]   ordered by danger_score descending
+                                     serialises to JSONB in the database
+
+  --- image reference ---
+  frame_image_url: str               URL or path to the captured frame image
+                                     storage backend is configurable (local, Drive, S3)
+                                     included in all human notifications
+
+  --- raw output ---
+  raw_detections: List[Detection]    everything YOLO returned, unmodified
+                                     serialises to JSONB in the database
 ```
 
 **VisionFuser**
@@ -446,9 +512,11 @@ VisionFuser        ──◆ owns ──────► FireDetector
 VisionFuser        ──◆ owns ──────► SceneClassifier
 VisionFuser        ── creates ───►  VisionSnapshot
 FireDetector       ── creates ───►  Detection
+FireDetector       ── creates ───►  FireCluster
+VisionSnapshot     ── contains ──►  List[FireCluster]
 VisionSnapshot     ── contains ──►  List[Detection]
 config.json        ── configures ►  VisionFuser (at init)
-config.json        ── configures ►  FireDetector (model path, threshold)
+config.json        ── configures ►  FireDetector (model path, threshold, proximity_threshold)
 config.json        ── configures ►  SceneClassifier (model path, threshold)
 labels.json        ── read by ───►  VisionFuser, SceneClassifier
 ```
@@ -466,12 +534,19 @@ labels.json        ── read by ───►  VisionFuser, SceneClassifier
   "models": {
     "fire": {
       "rpk": "models/fire_yolo.rpk",
-      "conf_threshold": 0.5
+      "conf_threshold": 0.5,
+      "glimpse_threshold": 0.2,
+      "proximity_threshold": 80
     },
     "scene": {
       "rpk": "models/scene_mobilenet.rpk",
       "conf_threshold": 0.4
     }
+  },
+  "storage": {
+    "frame_image_backend": "local",
+    "frame_image_path": "frames/",
+    "frame_image_url_prefix": "http://192.168.1.1:5000/frames/"
   },
   "labels": "configs/labels.json"
 }
@@ -512,14 +587,14 @@ The most important computation in THINK is the event chain analysis performed by
 
 For example, if snapshots arrive at timestamps 1.0, 0.9, 0.8, 0.7, 0.6, 0.2 (seconds ago) and `max_gap_ms` is 150ms, the chain includes 1.0 through 0.6 and stops — the gap between 0.6 and 0.2 exceeds the threshold, meaning they belong to separate events.
 
-For this event chain, `ThinkLogs` calculates the following for each sensor reading and each YOLO output field:
+For this event chain, `ThinkLogs` calculates the following for each sensor reading and each vision field:
 
 - **Average** across the chain
 - **Variance** across the chain
 - **Growth rate** (first derivative) — how fast the value is changing
 - **Acceleration** (second derivative) — how fast the growth rate itself is changing
 
-For the YOLO outputs, growth rate and acceleration are computed over `bbox_area` (width × height as a ratio of frame area), `fire_area_ratio`, and `fire_confidence`. These time-series derivatives are what allow the model to distinguish a stable candle from an accelerating fire — two events that may look identical in a single snapshot but are completely different across a chain.
+For the vision outputs, growth rate and acceleration are computed over `dominant cluster total_area_ratio`, `fire_union_area`, `smoke_union_area`, `primary_confidence`, and `origin_x` / `origin_y` of the dominant cluster. These time-series derivatives are what allow the model to distinguish a stable candle from an accelerating fire — two events that may look identical in a single snapshot but are completely different across a chain.
 
 ### 6.5 Machine learning architecture
 
@@ -545,7 +620,19 @@ A ModelEvaluator class is planned as an offline diagnostic tool that runs agains
 
 For each sensor, the feature vector includes: `latest_normalized`, `avg_over_chain`, `variance_over_chain`, `growth_rate`, `acceleration`.
 
-For vision outputs: `fire_detected` (0/1), `fire_count`, `fire_area_ratio`, `fire_confidence`, `bbox_area_ratio`, `bbox_growth_rate`, `bbox_acceleration`, `scene_label` (encoded to int), `human_near_fire` (0/1).
+For vision outputs — dominant cluster only (index 0):
+`composite_label` (encoded to int: 0=none, 1=smoke, 2=fire, 3=fire-smoke),
+`glimpsed_fire` (0/1), `human_near_fire` (0/1),
+`fire_count`, `smoke_count`, `cluster_count`,
+`fire_union_area`, `smoke_union_area`,
+`dominant_total_area_ratio`, `dominant_fire_area_ratio`, `dominant_smoke_area_ratio`,
+`dominant_primary_confidence`, `dominant_origin_x`, `dominant_origin_y`,
+`dominant_has_fire` (0/1), `dominant_has_smoke` (0/1),
+`dominant_area_growth_rate`, `dominant_area_acceleration`,
+`dominant_origin_x_growth_rate`, `dominant_origin_y_growth_rate`,
+`scene_label` (encoded to int).
+
+`cluster_count` is included so the model is aware when multiple fires exist even though only the dominant cluster is fully represented in the feature vector. Multi-fire feature expansion is a future extension.
 
 For derived fields: `escalation_trend` (encoded), `estimated_origin_zone` (encoded), `chain_length`.
 
@@ -817,7 +904,7 @@ Two solutions exist (elbow up / elbow down). The solver selects the one within t
 
 Notifications take three forms: email (with dynamic content and action links), website popup (ephemeral, dismissable), and notification tab entry (persistent, remains visible until cleared by the admin).
 
-The email structure changes based on `danger_level` and `escalation_trend`. A level 2 steady email looks very different from a level 4 accelerating email. Action links in the email redirect the recipient to the website where they can trigger suppress, monitor, or ignore responses directly.
+The email structure changes based on `danger_level` and `escalation_trend`. A level 2 steady email looks very different from a level 4 accelerating email. The email always includes the `composite_label` in plain language (e.g. "Fire and smoke detected"), the captured frame image, the `cluster_count` if greater than 1 (e.g. "2 separate fire sources detected"), and the `danger_level` expressed as a word (e.g. "HIGH") — not a number. The goal is zero technical knowledge required to understand a notification. A non-technical person receiving a level 4 email must be able to grasp the situation and act within seconds of opening it. Action links in the email redirect the recipient to the website where they can trigger suppress, monitor, or ignore responses directly.
 
 ### 7.7 Class definitions
 
@@ -1089,7 +1176,7 @@ ActuatorParser   ── creates ────► List[Actuator] (factory at init)
 
 A single table holds the complete lifecycle of every event the system observes. THINK creates a row. ACT updates it. Outcome is written when the event resolves. Human validators write the training columns.
 
-JSONB columns (`sensor_readings`, `sensor_normalized`, `raw_detections`) handle variable hardware configurations — a deployment with 2 sensors or 10 sensors uses the same schema without changes.
+JSONB columns (`sensor_readings`, `sensor_normalized`, `raw_detections`, `fire_clusters`) handle variable hardware configurations and variable detection counts — a deployment with 2 sensors or 10 sensors, one fire cluster or five, uses the same schema without changes.
 
 ```sql
 CREATE TABLE think_snapshots (
@@ -1101,15 +1188,24 @@ CREATE TABLE think_snapshots (
   sensor_readings          JSONB,
   sensor_normalized        JSONB,
 
-  -- vision inputs
-  fire_detected            BOOLEAN,
+  -- vision inputs — frame level
+  composite_label          TEXT,
+  glimpsed_fire            BOOLEAN,
+  human_near_fire          BOOLEAN,
   fire_count               INT,
-  fire_area_ratio          FLOAT,
-  fire_confidence          FLOAT,
+  smoke_count              INT,
+  fire_union_area          FLOAT,
+  smoke_union_area         FLOAT,
+  cluster_count            INT,
   scene_label              TEXT,
   scene_confidence         FLOAT,
-  human_near_fire          BOOLEAN,
+
+  -- vision inputs — clusters (variable length, JSONB)
+  fire_clusters            JSONB,
   raw_detections           JSONB,
+
+  -- image reference
+  frame_image_url          TEXT,
 
   -- think derived
   spread_rate              FLOAT,
@@ -1162,6 +1258,9 @@ Key design decisions that belong in config:
 | `available` actions | Only actions with connected actuators should be available |
 | `copilot_timeout_s` | Varies by deployment context and staffing |
 | `clear_delay_s` | How long fire must be gone before system resets |
+| `proximity_threshold` | Controls how close boxes must be to form a cluster |
+| `glimpse_threshold` | Confidence floor for glimpsed_fire flag |
+| `frame_image_backend` | Storage backend for captured frame images |
 
 ---
 
@@ -1189,23 +1288,46 @@ class SensorSnapshot:
 
 ```python
 @dataclass
-class VisionSnapshot:
-    timestamp: float
-    fire_detected: bool
-    fire_count: int
-    fire_area_ratio: float         # bbox_area / frame_area
-    fire_confidence: float         # highest confidence detection
-    scene_label: str               # from labels.json scene_labels
-    scene_confidence: float
-    human_near_fire: bool          # derived: fire AND human label detected
-    raw_detections: List[Detection]
-
-@dataclass
 class Detection:
     label: str
     confidence: float
     bbox: Tuple[int, int, int, int]   # x, y, w, h in pixels
     area_ratio: float
+
+@dataclass
+class FireCluster:
+    cluster_id: int
+    origin_x: float                   # centroid x of fire+smoke union bbox
+    origin_y: float                   # centroid y of fire+smoke union bbox
+    total_area_ratio: float           # union of all boxes in cluster / frame area
+    fire_area_ratio: float            # fire boxes union only / frame area
+    smoke_area_ratio: float           # smoke boxes union only / frame area
+    primary_label: str                # label of highest danger-score box
+    primary_confidence: float
+    primary_bbox: Tuple[int, int, int, int]
+    box_count: int
+    has_fire: bool
+    has_smoke: bool
+    # danger_score = primary_confidence × total_area_ratio
+    # clusters ordered descending by danger_score — index 0 is most dangerous
+
+@dataclass
+class VisionSnapshot:
+    timestamp: float
+    scene_label: str
+    scene_confidence: float
+    composite_label: str              # "fire-smoke" | "fire" | "smoke" | "none"
+    glimpsed_fire: bool
+    human_near_fire: bool
+    fire_count: int
+    smoke_count: int
+    fire_union_area: float
+    smoke_union_area: float
+    cluster_count: int
+    dominant_cluster_idx: int         # always 0
+    fire_clusters: List[FireCluster]
+    frame_image_url: str
+    raw_detections: List[Detection]
 ```
 
 ### THINK output contract
@@ -1220,5 +1342,37 @@ ACT calls `ThinkDatabase.update_act(id, mode, action)` and later `ThinkDatabase.
 
 ---
 
+## 11. Future Plans
+
+These are confirmed extensions to the system. None of them require changes to the core SENSE → SEE → THINK → ACT pipeline. They are designed as plugins that sit on top of the existing architecture.
+
+### 11.1 Multi-fire response dispatch
+
+When `cluster_count > 1`, the system currently reasons only about the dominant cluster (index 0) for its danger assessment, but logs all clusters in `fire_clusters` JSONB. The future extension is to route each cluster to a separate actuator — a second extinguisher, a second arm, or a drone. The `ActEngine` would iterate over `fire_clusters` and dispatch to available actuators in danger-score order. The pipeline and DB schema require no changes — the cluster list is already there.
+
+### 11.2 Fire growth and movement tracking
+
+The `origin_x` and `origin_y` fields in `FireCluster` are stored every snapshot. `ThinkLogs` already computes growth rate and acceleration over `total_area_ratio`. The future extension adds:
+
+- **Spherical growth model** — fitting a growth curve to `total_area_ratio` over the chain to estimate when the fire will reach a critical size
+- **Origin drift tracking** — computing velocity of `origin_x` / `origin_y` over the chain to detect whether the fire is moving (e.g. spreading across a surface) versus expanding in place
+- **Trajectory prediction** — extrapolating origin drift to estimate where the fire will be in N seconds
+
+This requires encoder feedback from the physical platform to map pixel coordinates to real-world coordinates. It is a ThinkLayer extension — no SEE changes needed.
+
+### 11.3 Platform spatial awareness
+
+The system currently has no knowledge of its own position or orientation in space. It only knows what it sees. The future extension adds encoder feedback from the arm or drone to build a coordinate map: pixel `(origin_x, origin_y)` → real-world `(x, y, z)` via forward kinematics. This unlocks trajectory prediction (11.2) and multi-actuator targeting (11.1) in physical space.
+
+### 11.4 Live monitoring website state
+
+A dedicated surveillance state on the website streams the live camera feed, sensor readings, and current ThinkSnapshot fields in real time. This is architecturally separate from the notification system. The website already receives snapshots for copilot confirmation — the live state extends this to a continuous stream. Design is deferred until the core pipeline is stable.
+
+### 11.5 XGBoost to multi-fire feature expansion
+
+The current feature vector uses dominant cluster only, with `cluster_count` as a signal. The future extension adds per-cluster features for the top N clusters (e.g. N=3), zero-padded when fewer clusters exist. This gives XGBoost full visibility into multi-fire scenes. Requires retraining on data that includes multi-fire events.
+
+---
+
 *Last updated: April 2026 — day 6*  
-*Architecture version: 0.2 — implementation in progress*
+*Architecture version: 0.3 — implementation in progress*
