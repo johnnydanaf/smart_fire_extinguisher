@@ -20,6 +20,8 @@
 9. [Configuration Reference](#9-configuration-reference)
 10. [Integration Contracts](#10-integration-contracts)
 11. [Future Plans](#11-future-plans)
+12. [Website and IoT Control](#12-website-and-iot-control)
+13. [Module Reusability Boundary](#13-module-reusability-boundary)
 
 ---
 
@@ -94,6 +96,13 @@ A strict ownership rule applies: each field in `SystemState` has exactly one wri
 | `see_running` | bool | VisionFuser | Orchestrator |
 | `think_running` | bool | ThinkEngine | Orchestrator |
 | `act_running` | bool | ActEngine | Orchestrator |
+| `camera_feed_active` | bool | SystemOrchestrator | VisionFuser |
+
+**`camera_feed_active` rules:**
+- Set to `True` only when the user explicitly opens the Camera Feed tab on the website. Never set automatically by threshold hits or any internal layer.
+- Set to `False` when the user leaves the Camera Feed tab or closes the session.
+- `SystemOrchestrator` is the sole writer — the website sends a request to the Flask backend which calls `SystemOrchestrator.set_camera_feed(active: bool)`.
+- `VisionFuser` activates when **either** `sensor_triggered = True` **or** `camera_feed_active = True`. These are two independent wake-up conditions — sensor threshold triggers SEE for fire detection, camera feed request triggers SEE for live streaming. Both are valid reasons for SEE to run.
 
 **Queues** — owned by SystemState, created at boot, never change:
 
@@ -110,9 +119,11 @@ Each layer watches its own relevant `SystemState` fields and activates or deacti
 | Process | Activates when | Deactivates when |
 |---------|---------------|-----------------|
 | SensorFuser | always on from boot | `system_running = False` |
-| VisionFuser | `sensor_triggered = True` | `sensor_triggered = False` |
+| VisionFuser | `sensor_triggered = True` OR `camera_feed_active = True` | both `sensor_triggered = False` AND `camera_feed_active = False` |
 | ThinkEngine | `sensor_triggered = True` AND snapshots available in queues | `sensor_triggered = False` |
 | ActEngine | ThinkSnapshot received in `think_queue` | `system_running = False` |
+
+> Note: VisionFuser serves two independent purposes — fire detection (woken by `sensor_triggered`) and live streaming (woken by `camera_feed_active`). When running in live stream mode only (sensor not triggered), VisionFuser captures frames and streams them to the website but does NOT emit `VisionSnapshot` to `see_queue` — THINK only processes when `sensor_triggered = True`.
 
 ### 3.4 Orchestrator flowchart
 
@@ -201,10 +212,16 @@ fields:
   valid_min: float
   valid_max: float
   fault: bool
+  formula: str | None    # optional custom conversion expression (see 4.3 design principles)
+                         # if None, linear fallback is used in to_physical()
 
 methods:
   read() → float                       [abstract]
   to_physical() → float
+    uses eval(formula, restricted_namespace) if formula is set
+    fallback: physical_min + ((raw - raw_min) / (raw_max - raw_min)) * (physical_max - physical_min)
+    restricted namespace exposes: raw, raw_min, raw_max, physical_min, physical_max only
+    eval errors → logged to stderr, shown in Console & Logs, sensor deactivated
   to_normalized() → float
   threshold_hit() → bool
   is_valid(value: float) → bool
@@ -267,10 +284,14 @@ methods:
 ```
 fields:
   timestamp: float
-  readings: Dict[str, float]
-  normalized: Dict[str, float]
-  triggered_sensors: List[str]
-  disabled_sensors: List[str]
+  readings: Dict[str, float]            # sensor_name → physical value (scalar, always populated)
+  normalized: Dict[str, float]          # sensor_name → 0.0–1.0
+  triggered_sensors: List[str]          # names of sensors above threshold
+  disabled_sensors: List[str]           # names of sensors currently faulted
+  raw_matrices: Dict[str, List[float]]  # sensor_name → flat grid, only for matrix sensors
+                                        # empty dict {} if no matrix sensors present
+                                        # shape defined in config per sensor e.g. "matrix_shape": [4, 4]
+                                        # always populated on every snapshot regardless of trigger state
 ```
 
 **SensorParser**
@@ -278,9 +299,18 @@ fields:
 fields:  config_path: str
 methods:
   load() → List[Sensor]
+    validates each sensor entry before building
+    skips and deactivates sensors with missing required fields
+    logs all validation failures to stderr and Console & Logs
+    returns only valid, enabled sensors
   save(sensors: List[Sensor]) → None
   disable(name: str) → None
   _build_sensor(entry: dict) → Sensor
+    factory method — branches on entry["interface"]
+    returns ADCSensor | I2CSensor | UARTSensor | GPIOSensor
+  _validate(entry: dict) → bool
+    checks all required fields are present and of correct type
+    logs specific missing field to stderr if validation fails
 ```
 
 ### 4.6 Relationships
@@ -307,13 +337,30 @@ GPIOSensor       ── inherits ───────────►  Sensor (A
     "pin": 0,
     "raw_min": 0,
     "raw_max": 4095,
-    "physical_min": -20,
-    "physical_max": 150,
+    "physical_min": 0,
+    "physical_max": 1000,
     "threshold_physical": 300,
     "unit": "ppm",
     "valid_min": 0,
     "valid_max": 1000,
     "max_retries": 3
+  },
+  "heat_matrix": {
+    "enabled": true,
+    "active": true,
+    "interface": "i2c",
+    "address": "0x69",
+    "i2c_bus": 1,
+    "raw_min": 0,
+    "raw_max": 655.35,
+    "physical_min": -20,
+    "physical_max": 300,
+    "threshold_physical": 60,
+    "unit": "celsius",
+    "valid_min": -20,
+    "valid_max": 300,
+    "max_retries": 3,
+    "matrix_shape": [4, 4]
   }
 },
 "system": {
@@ -324,6 +371,11 @@ GPIOSensor       ── inherits ───────────►  Sensor (A
   "rolling_window_n": 5
 }
 ```
+
+**Notes on config fields:**
+- `formula` is optional. If omitted, `to_physical()` uses the default linear mapping. Specify only when the sensor requires a custom conversion e.g. `"formula": "physical_min + ((raw - raw_min) / (raw_max - raw_min)) * (physical_max - physical_min) + 5"`. Available variables in the formula string: `raw`, `raw_min`, `raw_max`, `physical_min`, `physical_max`.
+- `matrix_shape` is required for matrix sensors only. Tells `SensorFuser` how to reshape the flat list from `read()` when building `raw_matrices` in the snapshot.
+- If any required field is missing, `SensorParser` skips the sensor, logs the specific missing field to `stderr`, and shows the error in Console & Logs on the website.
 
 ---
 
@@ -1275,11 +1327,15 @@ These are the data contracts between layers. Each person building a layer needs 
 ```python
 @dataclass
 class SensorSnapshot:
-    timestamp: float               # Unix timestamp, seconds
-    readings: Dict[str, float]     # sensor_name → physical value
-    normalized: Dict[str, float]   # sensor_name → 0.0–1.0
-    triggered_sensors: List[str]   # names of sensors above threshold
-    disabled_sensors: List[str]    # names of sensors currently faulted
+    timestamp: float                          # Unix timestamp, seconds
+    readings: Dict[str, float]                # sensor_name → physical value (scalar, always populated)
+    normalized: Dict[str, float]              # sensor_name → 0.0–1.0
+    triggered_sensors: List[str]              # names of sensors above threshold
+    disabled_sensors: List[str]               # names of sensors currently faulted
+    raw_matrices: Dict[str, List[float]]      # sensor_name → flat grid (matrix sensors only)
+                                              # empty dict {} if no matrix sensors present
+                                              # shape defined in config per sensor e.g. "matrix_shape": [4, 4]
+                                              # always populated on every snapshot regardless of trigger state
 ```
 
 ### SEE output contract
@@ -1342,7 +1398,114 @@ ACT calls `ThinkDatabase.update_act(id, mode, action)` and later `ThinkDatabase.
 
 ---
 
-## 11. Future Plans
+## 12. Website and IoT Control
+
+The website is a Flask application running on the Pi itself, accessible over the local network from any device. It is the sole interface for remote configuration, live monitoring, manual control, and training. It communicates with the system exclusively through `SystemOrchestrator` — it never touches `SystemState` directly.
+
+### 12.1 Communication flow
+
+```
+Browser → Flask route → SystemOrchestrator method → SystemState field update
+```
+
+The website never writes to `SystemState` directly. Every user action goes through a Flask route which calls the appropriate `SystemOrchestrator` method. The orchestrator is the single point of control for all runtime changes.
+
+### 12.2 Dashboard screens
+
+**Live Dashboard**
+- Displays: system uptime, active sensor count, events today, model accuracy
+- Displays: live sensor readings from latest `SensorSnapshot` in DB
+- Displays: current system mode with mode switcher (Autopilot / Copilot / Surveillance)
+- Mode switch → `POST /api/mode` → `SystemOrchestrator.set_mode(mode)`
+
+**Camera Feed**
+- Displays: live MJPEG stream from VisionFuser when active
+- Opening this tab → `POST /api/camera/start` → `SystemOrchestrator.set_camera_feed(True)` → `SystemState.camera_feed_active = True`
+- Leaving this tab → `POST /api/camera/stop` → `SystemOrchestrator.set_camera_feed(False)` → `SystemState.camera_feed_active = False`
+- Stream is served by Flask as MJPEG from a shared frame buffer written by VisionFuser
+
+**Training Platform**
+- Displays: current model version, accuracy, last trained date, training history
+- Actions: start training session, upload training data, generate synthetic data, validate model
+- All training actions call `ThinkEngine` methods through Flask routes
+- Admin only
+
+**Console & Logs**
+- Displays: system log stream (INFO, WARN, ERROR) with timestamps
+- Displays: CPU usage, memory usage, storage usage
+- All `stderr` output from `SensorParser` validation failures and formula eval errors appears here
+- Clear logs button → `POST /api/logs/clear`
+
+**Configuration**
+- Displays: all sensors from `config.json` as editable cards
+- Editable fields per sensor: enabled toggle, threshold, physical min/max, raw min/max, unit, formula string
+- Displays: system settings (polling intervals, max gap, default mode)
+- Save → `POST /api/config/update` → writes updated `config.json` → restarts affected layer
+- Warning shown on save: "Changes will restart the SENSE layer"
+- `SensorParser` re-runs on restart — any validation failures shown immediately in Console & Logs
+- Admin only
+
+**Control**
+- Arm Control: two sliders (one per joint), current angle display, Send Command button, Home Position button
+- Manual arm command → `POST /api/actuators/arm` → `SystemOrchestrator.send_arm_command(angles)`  → passed to `ActEngine`
+- Actuators: individual cards for Pump and Alarm with current status and manual trigger button
+- Manual actuator trigger → `POST /api/actuators/trigger` → `SystemOrchestrator.trigger_actuator(name, state)`
+- Emergency Stop button → `POST /api/actuators/stop_all` → deactivates all actuators immediately
+- Admin only
+
+### 12.3 SystemOrchestrator IoT methods
+
+```
+set_mode(mode: str) → None
+  writes system_mode to SystemState
+
+set_camera_feed(active: bool) → None
+  writes camera_feed_active to SystemState
+
+update_config(new_config: dict) → None
+  validates new config
+  writes config.json
+  restarts SENSE layer
+
+send_arm_command(angles: List[float]) → None
+  passes joint angles directly to ActEngine
+  bypasses THINK — manual override only
+
+trigger_actuator(name: str, state: bool) → None
+  activates or deactivates a named actuator directly
+  bypasses THINK — manual override only
+
+stop_all_actuators() → None
+  emergency stop — deactivates all actuators immediately
+```
+
+### 12.4 Module boundary
+
+The website and Flask backend live in `src/website/`. This is a project-specific module — it knows about the specific sensors, actuators, and config structure of this deployment. It is not part of the reusable layer packages (`sense/`, `see/`, `think/`, `act/`). If this system is deployed elsewhere, only `src/core/` and `src/website/` need to change.
+
+---
+
+## 13. Module Reusability Boundary
+
+This is a critical design principle that must be understood by everyone building a layer.
+
+```
+src/sense/    ← reusable, project-agnostic
+src/see/      ← reusable, project-agnostic
+src/think/    ← reusable, project-agnostic
+src/act/      ← reusable, project-agnostic
+src/core/     ← project-specific (SystemState, SystemOrchestrator, enums)
+src/website/  ← project-specific (Flask app, dashboard, IoT control)
+configs/      ← project-specific (config.json, labels.json)
+```
+
+**The rule:** The four layer packages (`sense/`, `see/`, `think/`, `act/`) never contain project-specific logic. They do not know what sensors are connected, what actuators exist, or what deployment context they are running in. They only know their contracts — what comes in, what goes out.
+
+All project-specific adaptation happens in `src/core/` and `src/website/`. `config.json` is the bridge — it tells the reusable modules what hardware they are working with without those modules needing to be changed.
+
+This means: if this system is deployed on a drone instead of a fixed Pi, or with different sensors, or in a different facility — the four layer packages are untouched. Only `config.json`, `SystemState`, and the website need updating.
+
+---
 
 These are confirmed extensions to the system. None of them require changes to the core SENSE → SEE → THINK → ACT pipeline. They are designed as plugins that sit on top of the existing architecture.
 
@@ -1374,5 +1537,5 @@ The current feature vector uses dominant cluster only, with `cluster_count` as a
 
 ---
 
-*Last updated: April 2026 — day 6*  
-*Architecture version: 0.3 — implementation in progress*
+*Last updated: April 2026 — day 7*  
+*Architecture version: 0.5 — implementation in progress*
