@@ -1538,4 +1538,4 @@ The current feature vector uses dominant cluster only, with `cluster_count` as a
 ---
 
 *Last updated: April 2026 — day 7*  
-*Architecture version: 0.5 — implementation in progress*
+*Architecture version: 2.0 — implementation in progress*
