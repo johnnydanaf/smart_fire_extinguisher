@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from datetime import datetime
+from time import time
 
 
 @dataclass
@@ -23,10 +23,18 @@ class SensorSnapshot:
     # sensor_name → normalized 0.0–1.0
     # e.g. {"smoke": 0.34, "temp": 0.45, "co": 0.12}
 
+    enabled_sensors: list[str] = field(default_factory=list)
+    # names of sensors set as enabled in config.json
+
+    disabled_sensors: list[str] = field(default_factory=list)
+    # names of sensors currently faulted and removed from active pool
+    # e.g. ["co"] — SensorFuser continues with remaining healthy sensors
+    # this list includes diabled from config + faulty sensor
+
     triggered_sensors: list[str] = field(default_factory=list)
     # names of sensors that crossed their threshold this reading
     # e.g. ["smoke", "temp"]
 
-    disabled_sensors: list[str] = field(default_factory=list)
+    faulty_sensors: list[str] = field(default_factory=list)
     # names of sensors currently faulted and removed from active pool
     # e.g. ["co"] — SensorFuser continues with remaining healthy sensors
