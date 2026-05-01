@@ -6,11 +6,9 @@ class SystemState:
     def __init__(self, manager, system_mode: str):
         self._data = manager.dict()
 
-        # 4 queues to store temporary polled version of the outputs of our layers
+        # 2 queues to store temporary polled version of the outputs of our layers
         self.sense_queue = manager.Queue()
         self.see_queue   = manager.Queue()
-        self.think_queue = manager.Queue()
-        self.act_queue   = manager.Queue()
 
         # updated from saved snapshots
         # might choose to have them in the db but for now placeholder

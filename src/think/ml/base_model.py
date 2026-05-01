@@ -4,25 +4,24 @@ from abc import ABC, abstractmethod
 
 class BaseModel(ABC):
     def __init__(self, config: str):
-        _importance_cache: dict[str, float]
-        
+        self.config_file = config        
     
     @abstractmethod
-    def fit():
+    def fit(self):
         pass
 
     @abstractmethod
-    def predict():
+    def predict(self):
         pass
 
     @abstractmethod
-    def save():
+    def save(self):
         pass
 
     @abstractmethod
-    def load():
+    def load(self):
         pass
 
     @abstractmethod
-    def feature_importance():
+    def feature_importance(self):
         pass
