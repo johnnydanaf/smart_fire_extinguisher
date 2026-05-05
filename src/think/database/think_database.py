@@ -8,10 +8,11 @@ from exceptions import DatabaseError
 
 
 class ThinkDatabase:
-    def __init__(self):
+    def __init__(self, max_gap_ms: int):
         self._connection = None
         self._connected = False
         self._last_row_id = None
+        self._max_gap_ms = max_gap_ms
 
     # --- connection ---
 
@@ -72,9 +73,38 @@ class ThinkDatabase:
                 """, self._snap_to_params(snap))
                 self._last_row_id = cur.fetchone()["id"]
             self._connection.commit()
+            self._assign_event_id()
         except Exception as e:
             self._connection.rollback()
             raise DatabaseError(f"Failed to log event: {e}")
+        
+    def _assign_event_id(self) -> None:
+        try:
+            with self._connection.cursor() as cur:
+                cur.execute("""
+                    SELECT id, event_id, timestamp
+                    FROM think_schema
+                    WHERE id < %s
+                    ORDER BY id DESC
+                    LIMIT 1
+                """, (self._last_row_id,))
+                prev = cur.fetchone()
+
+                if prev and prev["event_id"] is not None:
+                    cur.execute("SELECT timestamp FROM think_schema WHERE id = %s", (self._last_row_id,))
+                    current = cur.fetchone()
+                    gap_ms = abs(current["timestamp"] - prev["timestamp"]) * 1000
+                    event_id = prev["event_id"] if gap_ms <= self._max_gap_ms else self._last_row_id
+                else:
+                    event_id = self._last_row_id
+
+                cur.execute("""
+                    UPDATE think_schema SET event_id = %s WHERE id = %s
+                """, (event_id, self._last_row_id))
+            self._connection.commit()
+        except Exception as e:
+            self._connection.rollback()
+            raise DatabaseError(f"Failed to assign event_id: {e}")
 
     def update_prediction(self, danger_level: int, action: str) -> None:
         danger_labels = {1: "MINIMAL", 2: "LOW", 3: "MODERATE", 4: "HIGH", 5: "CRITICAL"}

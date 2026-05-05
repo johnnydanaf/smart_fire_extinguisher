@@ -16,7 +16,6 @@ class ThinkEngine:
             self._config = json.load(f)
 
         self._state = state
-        self._db = ThinkDatabase()
         self._model: BaseModel = None
 
         think_cfg = self._config.get("think", {})
@@ -28,6 +27,7 @@ class ThinkEngine:
         self._see_enabled = self._config.get("see", {}).get("enabled", True)
 
         self._running = False
+        self._db = ThinkDatabase(self._max_gap_ms)
 
     # --- lifecycle ---
 
@@ -78,7 +78,6 @@ class ThinkEngine:
 
     def _process(self, snap: ThinkSnapshot):
         self._db.log_event(snap)
-        self._assign_event_id()
         features = self._db.build_feature_vector(self._db.last_row_id)
         danger_level = self._model.predict(features)
         action = self._lookup_action(danger_level)
@@ -114,9 +113,6 @@ class ThinkEngine:
         )
 
     # --- helpers ---
-
-    def _assign_event_id(self):
-        pass
 
     def _lookup_action(self, danger_level: int) -> str:
         poa_map = self._config.get("think", {}).get("poa_map", {})
