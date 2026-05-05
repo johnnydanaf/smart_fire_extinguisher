@@ -11,10 +11,8 @@ from exceptions import DatabaseError, AlignmentError, ModelError
 
 
 class ThinkEngine:
-    def __init__(self, config_path: str, state: SystemState):
-        with open(config_path, 'r') as f:
-            self._config = json.load(f)
-
+    def __init__(self, config: dict, state: SystemState):
+        self._config = config
         self._state = state
         self._model: BaseModel = None
 
@@ -105,6 +103,9 @@ class ThinkEngine:
             gap_ms = abs((sense_snap.timestamp - see_snap.timestamp).total_seconds() * 1000)
             if gap_ms > self._max_gap_ms:
                 raise AlignmentError(f"Timestamp gap {gap_ms}ms exceeds max {self._max_gap_ms}ms")
+
+        if not sense_snap and not see_snap:
+            return None
 
         return ThinkSnapshot(
             timestamp=sense_snap.timestamp if sense_snap else see_snap.timestamp,
