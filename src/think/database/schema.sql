@@ -1,4 +1,4 @@
-CREATE TABLE IF NOT EXISTS think_snapshots (
+CREATE TABLE IF NOT EXISTS think_schema (
     id                    SERIAL PRIMARY KEY,
     event_id              INTEGER,
     timestamp             FLOAT NOT NULL,
@@ -34,5 +34,5 @@ CREATE TABLE IF NOT EXISTS think_snapshots (
     true_action           TEXT
 );
 
-CREATE INDEX IF NOT EXISTS idx_think_snapshots_event_id
-    ON think_snapshots(event_id);
+CREATE INDEX IF NOT EXISTS idx_think_schema_event_id
+    ON think_schema(event_id);
