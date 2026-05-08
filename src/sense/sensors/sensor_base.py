@@ -1,45 +1,100 @@
-# src/sense/sensor_base.py
+# src/sense/sensors/sensor_base.py
 
 from abc import ABC, abstractmethod
-from exceptions import SensorFaultError
+import time
+
+
+class SensorFaultError(Exception):
+    """Custom exception raised when a sensor fails after all retries"""
+    pass
 
 
 class Sensor(ABC):
+    """
+    Abstract base class for all sensor types.
+    
+    Every sensor (I2C, UART, GPIO) inherits from this class.
+    Provides common functionality: conversion, validation, threshold checking.
+    Each subclass only needs to implement read() and _ping().
+    """
 
-    def __init__():
-        # BE CAREFUL TO HAVE THE SAME CALL FROM THE SENSOR PARSER 
-        # INIT SHOULD ONLY TAKE THE CONFIFG DICT SECTION
-        pass
-
-    @property
-    def name(self) -> str:
-        return self._name
-
-    @property
-    def faulted(self) -> bool:
-        return self._faulted
-
+    def __init__(self, name: str, config: dict):
+        """
+        Initialize sensor with configuration from config.json
+        
+        Args:
+            name: Sensor identifier (from config key)
+            config: Sensor configuration dict section
+        """
+        # Identity
+        self.name = name
+        self.enabled = config.get('enabled', True)
+        self.interface = config['interface']
+        
+        # Raw value range (child classes need this for conversion)
+        self.raw_min = float(config['raw_min'])
+        self.raw_max = float(config['raw_max'])
+        
+        # Physical value range (also used for validation)
+        self.physical_min = float(config['physical_min'])
+        self.physical_max = float(config['physical_max'])
+        self.threshold_physical = float(config['threshold_physical'])
+        self.unit = config['unit']
+        
+        # Retry configuration
+        self._max_retries = config.get('max_retries', 3)
+        
+        # Runtime state (accessed by SensorFuser)
+        self._faulted = False
+        self._fault_count = 0
+    
+    # ============================================
+    # ABSTRACT METHODS (child must implement)
+    # ============================================
+    
     @abstractmethod
     def read(self) -> float:
-        """Return the TRANSFORMED PHYCIAL VALUE THAT A HUMAN CAN UNDERSTAND sensor value."""
-        # READ SHOULD HANDLE FALSE READINGS AND RETRY MAX TRETRIES INTERNALLY, SO NO NEED TO HANDLE RETRIES IN POLL() FUNCTION, JUST CALL READ() AND RETURN THE RESULTS AS A TUPLE
-        # MAX RETRIES SHOULD BE HANDLED INTERNALLY IN THE READ FUNCTION, SO IF A READING IS OUTSIDE THE VALID RANGE, IT SHOULD RETRY UP TO MAX_RETRIES TIMES BEFORE RAISING AN EXCEPTION
-        # MAX RETRIES IS FROM THE SENSOR CONFIG AS WELL AND CAN BE DIFFERENT FOR EACH SENSOR, SO IT SHOULD BE HANDLED INTERNALLY IN THE READ FUNCTION AND NOT IN THE POLL FUNCTION
+        """
+        Read from hardware and return PHYSICAL value.
+        
+        Child class must:
+        1. Read raw value from hardware
+        2. Convert to physical units
+        3. Return physical value
+        
+        Returns:
+            float: Physical value in sensor's units (ppm, °C, etc.)
+        """
         pass
-
-    # IF YOU CANNOT FULLY SUPPORT THIS AND EXPLAIN IT AS I HAVE NEVER HEARD OF A BUILT IN PING FIND AN IMPLEMENTATIOHN YOU CAN SUPPORT
+    
     @abstractmethod
     def _ping(self) -> None:
         """
         Test that the hardware is reachable and correctly configured.
-        Must raise on any failure — exception is caught by ping().
+        
+        Child class implements hardware-specific validation:
+        - I2C: Scan bus for device address
+        - UART: Test serial port connection
+        - GPIO: Verify pin is accessible
+        
+        Raises:
+            Exception: On any hardware failure
         """
         pass
-
+    
+    # ============================================
+    # HARDWARE VALIDATION
+    # ============================================
+    
     def ping(self) -> bool:
         """
         Validate sensor hardware at startup.
-        Calls _ping(); sets _faulted=True and returns False on any exception.
+        
+        Calls child's _ping() method and handles exceptions.
+        Used by SensorFuser to verify hardware before polling.
+        
+        Returns:
+            bool: True if hardware responding, False if faulted
         """
         try:
             self._ping()
@@ -47,26 +102,118 @@ class Sensor(ABC):
         except Exception:
             self._faulted = True
             return False
-
+    
+    # ============================================
+    # CONVERSION METHOD
+    # ============================================
+    
+    def to_normalized(self, physical_value: float) -> float:
+        """
+        Convert physical value to normalized 0.0-1.0 scale for ML.
+        
+        Args:
+            physical_value: Physical value in sensor's units
+            
+        Returns:
+            float: Normalized value in range [0.0, 1.0]
+        """
+        physical_range = self.physical_max - self.physical_min
+        
+        if physical_range == 0:
+            return 0.0
+        
+        normalized_value = (physical_value - self.physical_min) / physical_range
+        
+        # Clamp to [0, 1]
+        return max(0.0, min(1.0, normalized_value))
+    
+    # ============================================
+    # VALIDATION & THRESHOLD
+    # ============================================
+    
+    def is_valid(self, physical_value: float) -> bool:
+        """
+        Check if physical value is within expected range.
+        
+        Uses physical_min and physical_max from config.
+        
+        Args:
+            physical_value: Physical value to validate
+            
+        Returns:
+            bool: True if valid, False if out of range
+        """
+        return self.physical_min <= physical_value <= self.physical_max
+    
+    def threshold_hit(self, physical_value: float) -> bool:
+        """
+        Check if physical value has crossed the alert threshold.
+        
+        Args:
+            physical_value: Physical value to check
+            
+        Returns:
+            bool: True if threshold crossed, False otherwise
+        """
+        return physical_value >= self.threshold_physical
+    
+    # ============================================
+    # POLLING METHOD (orchestrates everything)
+    # ============================================
+    
     def poll(self) -> tuple[float, float, bool]:
         """
-        Read the sensor up to max_retries times.
-        Returns (physical_value, normalized_value, threshold_hit).
-        A reading outside [valid_min, valid_max] counts as a failed attempt.
-        Sets _faulted=True and raises SensorFaultError after all retries fail.
-        """
+        Complete sensor reading cycle with retry logic.
         
-        #poll should call read() and to_normalized() and threshold_hit() and return the results as a tuple
-        # the read() function is updated to return the pysical human interpreted vaue and not raw value, so the poll() function should call read() and then to_normalized() and threshold_hit() and return the results as a tuple
-        # read should handle false readings and retry max tretries internally, so no need to handle retries in poll() function, just call read() and return the results as a tuple
-        pass
-
-    def to_normalized(self, physical: float) -> float:
-        # Convert a physical value to a normalized value in RANGE [0, 1].
-        span = self._physical_max - self._physical_min
-        if span == 0:
-            return 0.0
-        return max(0.0, min(1.0, (physical - self._physical_min) / span))
-
-    def threshold_hit(self, physical: float) -> bool:
-        return physical >= self._threshold_physical
+        This is the main method called by SensorFuser.
+        Handles retries, validation, and threshold checking.
+        
+        Returns:
+            tuple: (physical_value, normalized_value, threshold_hit)
+            
+        Raises:
+            SensorFaultError: If sensor fails after all retries
+        """
+        for attempt in range(self._max_retries):
+            try:
+                # Step 1: Read physical value from hardware (child handles conversion)
+                physical_value = self.read()
+                
+                # Step 2: Validate against physical range
+                if not self.is_valid(physical_value):
+                    # Invalid reading - retry
+                    if attempt < self._max_retries - 1:
+                        time.sleep(0.1)
+                        continue
+                    else:
+                        raise ValueError(
+                            f"{self.name}: Invalid reading {physical_value}{self.unit} "
+                            f"(valid range: {self.physical_min}-{self.physical_max})"
+                        )
+                
+                # Step 3: Reading is valid - calculate normalized and check threshold
+                normalized_value = self.to_normalized(physical_value)
+                threshold_crossed = self.threshold_hit(physical_value)
+                
+                # Step 4: Reset fault counter on success
+                self._fault_count = 0
+                
+                # Step 5: Return tuple for SensorFuser
+                return (physical_value, normalized_value, threshold_crossed)
+                
+            except Exception as e:
+                # Reading failed - increment fault counter
+                self._fault_count += 1
+                
+                if attempt < self._max_retries - 1:
+                    # Not last attempt - retry
+                    time.sleep(0.1)
+                    continue
+                else:
+                    # All retries exhausted - raise fault
+                    raise SensorFaultError(
+                        f"{self.name} failed after {self._max_retries} retries: {str(e)}"
+                    )
+        
+        # Should never reach here
+        raise SensorFaultError(f"{self.name} polling failed")
