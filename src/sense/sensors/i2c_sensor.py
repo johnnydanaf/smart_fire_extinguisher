@@ -3,7 +3,7 @@
 from __future__ import annotations
 import logging
 import struct
-from sense.sensor_base import Sensor
+from sense.sensors.sensor_base import Sensor
 
 logger = logging.getLogger(__name__)
 
