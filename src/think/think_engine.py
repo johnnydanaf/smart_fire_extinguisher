@@ -25,7 +25,7 @@ class ThinkEngine:
         self._see_enabled = self._config.get("see", {}).get("enabled", True)
 
         self._running = False
-        self._db = ThinkDatabase(self._max_gap_ms)
+        self._db = ThinkDatabase(self._config)
 
     # --- lifecycle ---
 
