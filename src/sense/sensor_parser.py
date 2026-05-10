@@ -45,7 +45,7 @@ class SensorParser:
                     f"for sensor '{sensor_name}'. Skipping."
                 )
                 continue
-
+            # the sensor name already exists in the config so no need to pass it seperately just send the sensor_cfg to the sensor class and it can extract the name from the config
             sensor_class = cls._INTERFACE_MAP[interface]
             sensor = sensor_class(sensor_name, sensor_cfg)
             sensors.append(sensor)

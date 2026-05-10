@@ -6,29 +6,10 @@ from exceptions import SensorFaultError
 
 class Sensor(ABC):
 
-    def __init__(
-        self,
-        name: str,
-        raw_min: float = 0,
-        raw_max: float = 4095,
-        physical_min: float = 0,
-        physical_max: float = 100,
-        threshold_physical: float = 50,
-        valid_min: float = None,
-        valid_max: float = None,
-        max_retries: int = 3,
-        **kwargs,
-    ):
-        self._name = name
-        self._raw_min = float(raw_min)
-        self._raw_max = float(raw_max)
-        self._physical_min = float(physical_min)
-        self._physical_max = float(physical_max)
-        self._threshold_physical = float(threshold_physical)
-        self._valid_min = float(valid_min) if valid_min is not None else self._physical_min
-        self._valid_max = float(valid_max) if valid_max is not None else self._physical_max
-        self._max_retries = int(max_retries)
-        self._faulted = False
+    def __init__():
+        # BE CAREFUL TO HAVE THE SAME CALL FROM THE SENSOR PARSER 
+        # INIT SHOULD ONLY TAKE THE CONFIFG DICT SECTION
+        pass
 
     @property
     def name(self) -> str:
@@ -40,9 +21,13 @@ class Sensor(ABC):
 
     @abstractmethod
     def read(self) -> float:
-        """Return the raw sensor value directly from hardware."""
+        """Return the TRANSFORMED PHYCIAL VALUE THAT A HUMAN CAN UNDERSTAND sensor value."""
+        # READ SHOULD HANDLE FALSE READINGS AND RETRY MAX TRETRIES INTERNALLY, SO NO NEED TO HANDLE RETRIES IN POLL() FUNCTION, JUST CALL READ() AND RETURN THE RESULTS AS A TUPLE
+        # MAX RETRIES SHOULD BE HANDLED INTERNALLY IN THE READ FUNCTION, SO IF A READING IS OUTSIDE THE VALID RANGE, IT SHOULD RETRY UP TO MAX_RETRIES TIMES BEFORE RAISING AN EXCEPTION
+        # MAX RETRIES IS FROM THE SENSOR CONFIG AS WELL AND CAN BE DIFFERENT FOR EACH SENSOR, SO IT SHOULD BE HANDLED INTERNALLY IN THE READ FUNCTION AND NOT IN THE POLL FUNCTION
         pass
 
+    # IF YOU CANNOT FULLY SUPPORT THIS AND EXPLAIN IT AS I HAVE NEVER HEARD OF A BUILT IN PING FIND AN IMPLEMENTATIOHN YOU CAN SUPPORT
     @abstractmethod
     def _ping(self) -> None:
         """
@@ -70,37 +55,14 @@ class Sensor(ABC):
         A reading outside [valid_min, valid_max] counts as a failed attempt.
         Sets _faulted=True and raises SensorFaultError after all retries fail.
         """
-        last_exc: Exception = RuntimeError("no attempts made")
-        for _ in range(self._max_retries):
-            try:
-                raw = self.read()
-                physical = self.to_physical(raw)
-                if not (self._valid_min <= physical <= self._valid_max):
-                    last_exc = SensorFaultError(
-                        f"{self._name}: reading {physical:.3f} outside valid range "
-                        f"[{self._valid_min}, {self._valid_max}]"
-                    )
-                    continue
-                return physical, self.to_normalized(physical), self.threshold_hit(physical)
-            except SensorFaultError:
-                raise
-            except Exception as exc:
-                last_exc = exc
-
-        self._faulted = True
-        raise SensorFaultError(
-            f"{self._name}: failed after {self._max_retries} retries — {last_exc}"
-        )
-
-    def to_physical(self, raw: float) -> float:
-        span_raw = self._raw_max - self._raw_min
-        if span_raw == 0:
-            return self._physical_min
-        return self._physical_min + (raw - self._raw_min) * (
-            (self._physical_max - self._physical_min) / span_raw
-        )
+        
+        #poll should call read() and to_normalized() and threshold_hit() and return the results as a tuple
+        # the read() function is updated to return the pysical human interpreted vaue and not raw value, so the poll() function should call read() and then to_normalized() and threshold_hit() and return the results as a tuple
+        # read should handle false readings and retry max tretries internally, so no need to handle retries in poll() function, just call read() and return the results as a tuple
+        pass
 
     def to_normalized(self, physical: float) -> float:
+        # Convert a physical value to a normalized value in RANGE [0, 1].
         span = self._physical_max - self._physical_min
         if span == 0:
             return 0.0
