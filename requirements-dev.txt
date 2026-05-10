@@ -6,6 +6,7 @@ flask
 xgboost
 pyserial
 smbus2
+
 psycopg2-binary
 
 # Adafruit CircuitPython / I2C

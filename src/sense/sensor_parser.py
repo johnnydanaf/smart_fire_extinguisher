@@ -1,5 +1,7 @@
+# src/sense/sensor_parser.py
+
 from sense.sensors.sensor_base import Sensor
-from sense.sensors import ADCSensor, GPIOSensor, I2CSensor, UARTSensor
+from sense.sensors.i2c_sensor import I2CSensor
 
 
 class SensorParser:
@@ -12,23 +14,26 @@ class SensorParser:
     """
 
     _INTERFACE_MAP = {
-        "adc": ADCSensor,
-        "gpio": GPIOSensor,
         "i2c": I2CSensor,
-        "uart": UARTSensor,
+        # "gpio":  GPIOSensor,   — not implemented yet
+        # "uart":  UARTSensor,   — not implemented yet
     }
 
     @classmethod
-    def build_sensors(cls, config: dict) -> list[Sensor]:
+    def build_sensors(cls, config: dict, i2c_buses: dict) -> list[Sensor]:
         """
         Parse the sensors section of config.json and return a list of
-        Sensor objects ready for SensorFuser to use.
+        Sensor objects ready for SensorFuser.
+
+        Injects 'name' and resolved '_bus_object' into sensor_cfg before
+        construction — sensors only need their own cfg dict, nothing else.
 
         Args:
-            config: The full config dict from orchestrator.
+            config:     Full config dict from orchestrator.
+            i2c_buses:  Dict of bus_name -> busio.I2C, built by SensorFuser.
 
         Returns:
-            A list of Sensor objects (may be empty if no sensors enabled).
+            List of Sensor objects (may be empty if no sensors enabled).
         """
         sensors = []
         sensor_configs = config.get("sensors", {})
@@ -39,15 +44,21 @@ class SensorParser:
 
             interface = sensor_cfg.get("interface", "").lower()
             if interface not in cls._INTERFACE_MAP:
-                # TODO: log to file or trigger notification when notify layer is ready
                 print(
                     f"[SensorParser] WARNING: Unknown interface '{interface}' "
                     f"for sensor '{sensor_name}'. Skipping."
                 )
                 continue
-            # the sensor name already exists in the config so no need to pass it seperately just send the sensor_cfg to the sensor class and it can extract the name from the config
+
+            # Always inject name
+            sensor_cfg = {**sensor_cfg, "name": sensor_name}
+
+            # Inject resolved bus object only for I2C
+            if interface == "i2c":
+                bus_name = sensor_cfg.get("bus")
+                sensor_cfg["_bus_object"] = i2c_buses.get(bus_name) if bus_name else None
+
             sensor_class = cls._INTERFACE_MAP[interface]
-            sensor = sensor_class(sensor_name, sensor_cfg)
-            sensors.append(sensor)
+            sensors.append(sensor_class(sensor_cfg))
 
         return sensors
