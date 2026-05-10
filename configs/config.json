@@ -1,0 +1,44 @@
+{
+  "system": {
+    "system_mode": "surveillance",
+    "polling_interval_idle_ms": 10000,
+    "polling_interval_active_ms": 1000,
+    "i2c_buses": {
+      "primary": { "scl": "SCL", "sda": "SDA" }
+    }
+  },
+  "sensors": {
+    "smoke": {
+      "enabled": true,
+      "interface": "i2c",
+      "bus": "primary",
+      "device_type": "ads1115",
+      "address": "0x48",
+      "channel": 0,
+      "gain": 1,
+      "equation": "A * (((3.3 - (raw / 32767.0) * 3.3) / ((raw / 32767.0) * 3.3)) * RL / Ro) ** B",
+      "eq_params": { "RL": 10000, "Ro": 9500, "A": 574.25, "B": -2.222 },
+      "raw_min": 0,
+      "raw_max": 32767,
+      "physical_min": 0,
+      "physical_max": 10000,
+      "threshold_physical": 300,
+      "unit": "ppm",
+      "max_retries": 3
+    },
+    "heat_grid": {
+      "enabled": true,
+      "interface": "i2c",
+      "bus": "primary",
+      "device_type": "amg8833",
+      "address": "0x69",
+      "raw_min": 0,
+      "raw_max": 80,
+      "physical_min": 0,
+      "physical_max": 80,
+      "threshold_physical": 50,
+      "unit": "C",
+      "max_retries": 3
+    }
+  }
+}

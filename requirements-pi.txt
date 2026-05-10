@@ -1,12 +1,14 @@
 numpy==1.26.4
 pandas==2.2.2
 ultralytics
-flake8
 flask
 xgboost
 pyserial
-smbus2
 psycopg2-binary
 RPi.GPIO
-adafruit-circuitpython-ads1x15
 picamera2
+
+# Adafruit CircuitPython / I2C
+adafruit-blinka
+adafruit-circuitpython-ads1x15
+adafruit-circuitpython-amg88xx
