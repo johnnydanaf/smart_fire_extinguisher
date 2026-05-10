@@ -8,6 +8,8 @@ psycopg2-binary
 RPi.GPIO
 picamera2
 
+scikit-learn
+
 # Adafruit CircuitPython / I2C
 adafruit-blinka
 adafruit-circuitpython-ads1x15
