@@ -2,6 +2,7 @@
 
 import time
 import threading
+import logging
 from datetime import datetime
 from typing import Any
 
@@ -11,6 +12,8 @@ import busio
 from core.system_state import SystemState
 from sense.sensor_parser import SensorParser
 from sense.snapshot import SensorSnapshot
+
+logger = logging.getLogger(__name__)
 
 
 class SensorFuser:
@@ -66,13 +69,17 @@ class SensorFuser:
     # ------------------------------------------------------------------
 
     def start(self):
+        logger.info("SensorFuser: starting")
         self._running = True
         self._state.sense_running = True
         self._update_state_sensor_counts()
         self._spawn_sensor_threads()
+        logger.info(f"SensorFuser: spawned {len(self._threads)} sensor threads")
         self._main_loop()
+        logger.info("SensorFuser: stopped")
 
     def stop(self):
+        logger.info("SensorFuser: stop requested")
         self._running = False
 
     def cleanup(self):
@@ -124,6 +131,10 @@ class SensorFuser:
                     any_triggered = any(self._threshold_flags.values())
 
                 if threshold_hit:
+                    logger.info(
+                        f"Sensor {sensor.name}: threshold_crossed | "
+                        f"value={physical} | threshold={sensor.threshold_physical}"
+                    )
                     self._on_threshold_triggered()
                 elif not any_triggered:
                     self._state.sensor_triggered = False
@@ -135,7 +146,12 @@ class SensorFuser:
                 )
                 time.sleep(interval)
 
-            except Exception:
+            except Exception as e:
+                logger.error(
+                    f"Sensor {sensor.name}: exception in _sensor_loop - "
+                    f"{type(e).__name__}: {e}",
+                    exc_info=True
+                )
                 if not sensor.faulted:
                     self._mark_sensor_faulted(sensor)
                 break
@@ -164,6 +180,11 @@ class SensorFuser:
                 faulty_sensors=[f["name"] for f in self._faulted_sensors],
             )
 
+        logger.info(
+            f"SensorSnapshot: pushed to sense_queue | "
+            f"timestamp={snapshot.timestamp.isoformat()} | "
+            f"triggered_sensors={snapshot.triggered_sensors}"
+        )
         self._state.sense_queue.put(snapshot)
 
     # ------------------------------------------------------------------
@@ -177,6 +198,7 @@ class SensorFuser:
                 "name": sensor.name,
                 "faulted_at": datetime.now().isoformat(),
             })
+        logger.info(f"Sensor {sensor.name}: marked as faulted")
         self._state.faulted_sensors = list(self._faulted_sensors)
         self._update_state_sensor_counts()
 

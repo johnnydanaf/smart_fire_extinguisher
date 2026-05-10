@@ -1,7 +1,10 @@
 # src/sense/sensor_parser.py
 
+import logging
 from sense.sensors.sensor_base import Sensor
 from sense.sensors.i2c_sensor import I2CSensor
+
+logger = logging.getLogger(__name__)
 
 
 class SensorParser:
@@ -44,9 +47,8 @@ class SensorParser:
 
             interface = sensor_cfg.get("interface", "").lower()
             if interface not in cls._INTERFACE_MAP:
-                print(
-                    f"[SensorParser] WARNING: Unknown interface '{interface}' "
-                    f"for sensor '{sensor_name}'. Skipping."
+                logger.warning(
+                    f"Unknown interface '{interface}' for sensor '{sensor_name}'. Skipping."
                 )
                 continue
 

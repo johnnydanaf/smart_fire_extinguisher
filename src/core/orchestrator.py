@@ -1,5 +1,6 @@
 import json
 import time
+import logging
 import multiprocessing
 from multiprocessing import Manager
 
@@ -11,6 +12,8 @@ from see import VisionFuser
 from think import ThinkEngine
 from act import ActEngine
 from notify import NotificationService
+
+logger = logging.getLogger(__name__)
 
 
 class SystemOrchestrator:
@@ -50,11 +53,16 @@ class SystemOrchestrator:
 
     def _load_config(self, config_path: str) -> dict:
         try:
+            logger.debug(f"Orchestrator: loading config | path={config_path}")
             with open(config_path, 'r') as f:
-                return json.load(f)
-        except FileNotFoundError:
+                config = json.load(f)
+            logger.info(f"Orchestrator: config loaded successfully")
+            return config
+        except FileNotFoundError as e:
+            logger.error(f"Orchestrator: config file not found - {config_path}", exc_info=True)
             raise ConfigError(f"Config file not found: {config_path}")
         except json.JSONDecodeError as e:
+            logger.error(f"Orchestrator: invalid JSON in config - {e}", exc_info=True)
             raise ConfigError(f"Config file is not valid JSON: {e}")
 
     # ------------------------------------------------------------------
@@ -63,15 +71,25 @@ class SystemOrchestrator:
 
     def _init_manager(self) -> None:
         try:
+            logger.debug("Orchestrator: initializing multiprocessing manager")
             self._manager = Manager()
         except Exception as e:
+            logger.error(
+                f"Orchestrator: failed to start manager - {type(e).__name__}: {e}",
+                exc_info=True
+            )
             raise StateInitError(f"Failed to start multiprocessing manager: {e}")
 
     def _init_state(self) -> None:
         try:
             system_mode = self._config.get("system", {}).get("system_mode", "surveillance")
+            logger.debug(f"Orchestrator: initializing SystemState | mode={system_mode}")
             self._state = SystemState(self._manager, system_mode)
         except Exception as e:
+            logger.error(
+                f"Orchestrator: failed to initialize SystemState - {type(e).__name__}: {e}",
+                exc_info=True
+            )
             raise StateInitError(f"Failed to initialize SystemState: {e}")
 
     def _init_layers(self) -> None:
@@ -86,6 +104,7 @@ class SystemOrchestrator:
     # ------------------------------------------------------------------
 
     def start(self) -> None:
+        logger.info("Orchestrator: starting system | spawning all processes")
         self._state.system_running = True
 
         self._sense_process = multiprocessing.Process(
@@ -106,11 +125,16 @@ class SystemOrchestrator:
         )
 
         self._sense_process.start()
+        logger.info("Orchestrator: SenseProcess started")
         self._see_process.start()
+        logger.info("Orchestrator: SeeProcess started")
         self._think_process.start()
+        logger.info("Orchestrator: ThinkProcess started")
         self._act_process.start()
+        logger.info("Orchestrator: ActProcess started")
 
     def stop(self) -> None:
+        logger.info("Orchestrator: stopping system | signaling all processes")
         self._state.system_running = False
         time.sleep(0.5)
 
@@ -123,20 +147,27 @@ class SystemOrchestrator:
 
         for process in all_processes:
             if process and process.is_alive():
+                logger.debug(f"Orchestrator: terminating {process.name}")
                 process.terminate()
                 process.join(timeout=2)
+        logger.info("Orchestrator: all processes stopped")
 
     def shutdown(self) -> None:
         """Full teardown — call once on system exit, not on restarts."""
+        logger.info("Orchestrator: full shutdown initiated")
         self.stop()
         if self._manager:
             self._manager.shutdown()
+            logger.info("Orchestrator: multiprocessing manager shutdown")
 
     def restart_all(self) -> None:
+        logger.info("Orchestrator: restarting all layers")
         self.stop()
         if self._sensor_fuser:
             self._sensor_fuser.cleanup()
+            logger.debug("Orchestrator: sensor cleanup completed")
         self._init_layers()
+        logger.debug("Orchestrator: layers reinitialized")
         self.start()
 
     # ------------------------------------------------------------------
@@ -144,9 +175,12 @@ class SystemOrchestrator:
     # ------------------------------------------------------------------
 
     def set_mode(self, mode: str) -> None:
+        logger.debug(f"Orchestrator: set_mode requested | mode={mode}")
         try:
             self._state.system_mode = mode
+            logger.info(f"Orchestrator: mode changed | mode={mode}")
         except ValueError as e:
+            logger.error(f"Orchestrator: invalid mode - {type(e).__name__}: {e}", exc_info=True)
             raise ModeError(f"Invalid mode: {e}")
 
     def set_camera_feed(self, active: bool) -> None:

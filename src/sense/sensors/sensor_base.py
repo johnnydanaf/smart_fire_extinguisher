@@ -3,6 +3,9 @@
 from abc import ABC, abstractmethod
 from typing import Any
 import time
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class SensorFaultError(Exception):
@@ -85,8 +88,13 @@ class Sensor(ABC):
     def ping(self) -> bool:
         try:
             self._ping()
+            logger.debug(f"Sensor {self.name}: ping successful")
             return True
-        except Exception:
+        except Exception as e:
+            logger.error(
+                f"Sensor {self.name}: ping failed - {type(e).__name__}: {e}",
+                exc_info=True
+            )
             self._faulted = True
             return False
 
@@ -141,6 +149,11 @@ class Sensor(ABC):
 
                 if not self.is_valid(scalar):
                     if attempt < self._max_retries - 1:
+                        logger.warning(
+                            f"Sensor {self.name}: Invalid reading {scalar}{self.unit} "
+                            f"(valid: {self.physical_min}-{self.physical_max}). "
+                            f"Retrying (attempt {attempt + 1}/{self._max_retries})"
+                        )
                         time.sleep(0.1)
                         continue
                     else:
@@ -152,17 +165,33 @@ class Sensor(ABC):
                 normalized_value  = self.to_normalized(scalar)
                 threshold_crossed = self.threshold_hit(scalar)
 
+                logger.debug(
+                    f"Sensor {self.name}: poll_result | "
+                    f"physical={physical_value} {self.unit} | "
+                    f"normalized={normalized_value:.3f} | "
+                    f"threshold_hit={threshold_crossed}"
+                )
+
                 self._fault_count = 0
                 return (physical_value, normalized_value, threshold_crossed)
 
             except Exception as e:
                 self._fault_count += 1
                 if attempt < self._max_retries - 1:
+                    logger.warning(
+                        f"Sensor {self.name}: Read failed (attempt {attempt + 1}/{self._max_retries}): "
+                        f"{type(e).__name__}: {e}"
+                    )
                     time.sleep(0.1)
                     continue
                 else:
-                    raise SensorFaultError(
-                        f"{self.name} failed after {self._max_retries} retries: {str(e)}"
+                    error_msg = (
+                        f"Sensor {self.name}: failed after {self._max_retries} retries: {str(e)}"
                     )
+                    logger.error(
+                        f"Sensor {self.name}: {error_msg}",
+                        exc_info=True
+                    )
+                    raise SensorFaultError(error_msg)
 
         raise SensorFaultError(f"{self.name} polling failed")
