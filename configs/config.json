@@ -40,5 +40,39 @@
       "unit": "C",
       "max_retries": 3
     }
+  },
+  "think": {
+    "active_model": "xgboost",
+    "model_weights_path": "model_weights/",
+    "max_gap_ms": 500,
+    "chain_length": 5,
+    "poa_map": {
+      "1": "monitor",
+      "2": "monitor",
+      "3": "alert",
+      "4": "suppress",
+      "5": "evacuate"
+    },
+    "label_encoding": {
+      "composite_label": {
+        "none": 0,
+        "smoke": 1,
+        "fire": 2,
+        "fire_smoke": 3
+      },
+      "scene_label": {
+        "clear": 0,
+        "hazy": 1,
+        "smoky": 2,
+        "fire": 3
+      }
+    },
+    "xgboost": {
+      "n_estimators": 100,
+      "max_depth": 4,
+      "learning_rate": 0.1,
+      "subsample": 0.8,
+      "colsample_bytree": 0.8
+    }
   }
 }

@@ -126,11 +126,16 @@ class SystemOrchestrator:
                 process.terminate()
                 process.join(timeout=2)
 
+    def shutdown(self) -> None:
+        """Full teardown — call once on system exit, not on restarts."""
+        self.stop()
         if self._manager:
             self._manager.shutdown()
 
     def restart_all(self) -> None:
         self.stop()
+        if self._sensor_fuser:
+            self._sensor_fuser.cleanup()
         self._init_layers()
         self.start()
 

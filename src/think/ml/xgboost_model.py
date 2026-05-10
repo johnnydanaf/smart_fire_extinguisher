@@ -18,6 +18,9 @@ class XGBoostModel(BaseModel):
 
     def fit(self, X, y):
         try:
+            # Shift labels 1-5 → 0-4 to match XGBoost's expected range.
+            # predict() adds 1 back, so danger_level output is always 1-5.
+            y_shifted = [label - 1 for label in y]
             self._model = xgb.XGBClassifier(
                 n_estimators=self._n_estimators,
                 max_depth=self._max_depth,
@@ -28,7 +31,7 @@ class XGBoostModel(BaseModel):
                 num_class=5,
                 random_state=42,
             )
-            self._model.fit(X, y)
+            self._model.fit(X, y_shifted)
         except Exception as e:
             raise ModelError(f"Training failed: {e}")
 

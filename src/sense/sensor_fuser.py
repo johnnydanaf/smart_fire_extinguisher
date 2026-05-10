@@ -24,11 +24,11 @@ class SensorFuser:
         self._polling_idle_ms   = system_cfg.get("polling_interval_idle_ms",   10000) / 1000.0
         self._polling_active_ms = system_cfg.get("polling_interval_active_ms", 1000)  / 1000.0
 
-        # Init I2C buses from config before building sensors
-        i2c_buses = self._init_i2c_buses(system_cfg.get("i2c_buses", {}))
+        # Init I2C buses from config before building sensors — stored for cleanup on restart
+        self._i2c_buses = self._init_i2c_buses(system_cfg.get("i2c_buses", {}))
 
         # Build sensors — config no longer needed after this
-        self._sensors = SensorParser.build_sensors(config, i2c_buses)
+        self._sensors = SensorParser.build_sensors(config, self._i2c_buses)
 
         self._state   = state
         self._running = False
@@ -75,6 +75,14 @@ class SensorFuser:
     def stop(self):
         self._running = False
 
+    def cleanup(self):
+        """Deinit all I2C buses — call before reinitializing layers on restart."""
+        for bus in self._i2c_buses.values():
+            try:
+                bus.deinit()
+            except Exception:
+                pass
+
     # ------------------------------------------------------------------
     # Thread management
     # ------------------------------------------------------------------
@@ -113,9 +121,12 @@ class SensorFuser:
                     self._latest_readings[sensor.name]   = physical
                     self._latest_normalized[sensor.name] = normalized
                     self._threshold_flags[sensor.name]   = threshold_hit
+                    any_triggered = any(self._threshold_flags.values())
 
                 if threshold_hit:
                     self._on_threshold_triggered()
+                elif not any_triggered:
+                    self._state.sensor_triggered = False
 
                 interval = (
                     self._polling_active_ms
@@ -125,10 +136,9 @@ class SensorFuser:
                 time.sleep(interval)
 
             except Exception:
-                sensor._fault_count += 1
-                if sensor._fault_count >= sensor._max_retries:
+                if not sensor.faulted:
                     self._mark_sensor_faulted(sensor)
-                time.sleep(self._polling_active_ms)
+                break
 
     # ------------------------------------------------------------------
     # Threshold handling

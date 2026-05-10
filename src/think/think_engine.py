@@ -21,9 +21,6 @@ class ThinkEngine:
         self._model_path = think_cfg.get("model_weights_path", "model_weights/")
         self._active_model = think_cfg.get("active_model", "xgboost")
 
-        self._sense_enabled = self._config.get("sense", {}).get("enabled", True)
-        self._see_enabled = self._config.get("see", {}).get("enabled", True)
-
         self._running = False
         self._db = ThinkDatabase(self._config)
 
@@ -86,27 +83,22 @@ class ThinkEngine:
     # --- alignment ---
 
     def _align(self):
-        # Drop partials: misaligned snapshots are worse than no snapshot.
         sense_snap = None
         see_snap = None
 
-        if self._sense_enabled:
-            if self._state.sense_queue.empty():
-                return None
+        if not self._state.sense_queue.empty():
             sense_snap = self._state.sense_queue.get()
 
-        if self._see_enabled:
-            if self._state.see_queue.empty():
-                return None
+        if not self._state.see_queue.empty():
             see_snap = self._state.see_queue.get()
+
+        if sense_snap is None and see_snap is None:
+            return None
 
         if sense_snap and see_snap:
             gap_ms = abs((sense_snap.timestamp - see_snap.timestamp).total_seconds() * 1000)
             if gap_ms > self._max_gap_ms:
                 raise AlignmentError(f"Timestamp gap {gap_ms}ms exceeds max {self._max_gap_ms}ms")
-
-        if not sense_snap and not see_snap:
-            return None
 
         return ThinkSnapshot(
             timestamp=sense_snap.timestamp if sense_snap else see_snap.timestamp,
