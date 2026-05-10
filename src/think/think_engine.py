@@ -2,12 +2,15 @@
 
 import time
 import json
+import logging
 from core.system_state import SystemState
 from think.database.think_database import ThinkDatabase
 from think.ml.base_model import BaseModel
 from think.ml.xgboost_model import XGBoostModel
 from think.snapshot import ThinkSnapshot
 from exceptions import DatabaseError, AlignmentError, ModelError
+
+logger = logging.getLogger(__name__)
 
 
 class ThinkEngine:
@@ -21,31 +24,37 @@ class ThinkEngine:
         self._model_path = think_cfg.get("model_weights_path", "model_weights/")
         self._active_model = think_cfg.get("active_model", "xgboost")
 
-        self._sense_enabled = self._config.get("sense", {}).get("enabled", True)
-        self._see_enabled = self._config.get("see", {}).get("enabled", True)
-
         self._running = False
-        self._db = ThinkDatabase(self._max_gap_ms)
+        self._db = ThinkDatabase(self._config)
 
     # --- lifecycle ---
 
     def start(self):
+        logger.info("ThinkEngine: starting")
         try:
             self._db.connect()
             self._state.db_connected = True
-        except DatabaseError:
+            logger.info("ThinkEngine: database connected")
+        except DatabaseError as e:
+            logger.error(
+                f"ThinkEngine: database connection failed - {type(e).__name__}: {e}",
+                exc_info=True
+            )
             self._state.db_connected = False
             raise
 
         self._load_model()
         self._running = True
         self._state.think_running = True
+        logger.info(f"ThinkEngine: model loaded (active={self._active_model})")
         self._run_loop()
 
     def stop(self):
+        logger.info("ThinkEngine: stop requested")
         self._running = False
         self._state.think_running = False
         self._db.close()
+        logger.info("ThinkEngine: database closed")
 
     # --- main loop ---
 
@@ -62,23 +71,42 @@ class ThinkEngine:
 
                 self._process(snap)
 
-            except AlignmentError:
+            except AlignmentError as e:
+                logger.warning(f"ThinkEngine: alignment error - {e}")
                 continue
-            except DatabaseError:
+            except DatabaseError as e:
+                logger.error(
+                    f"ThinkEngine: database error - {type(e).__name__}: {e}",
+                    exc_info=True
+                )
                 self._state.db_connected = False
                 time.sleep(1)
-            except ModelError:
+            except ModelError as e:
+                logger.error(
+                    f"ThinkEngine: model error - {type(e).__name__}: {e}",
+                    exc_info=True
+                )
                 time.sleep(1)
-            except Exception:
+            except Exception as e:
+                logger.error(
+                    f"ThinkEngine: unexpected error - {type(e).__name__}: {e}",
+                    exc_info=True
+                )
                 time.sleep(1)
 
     # --- processing pipeline ---
 
     def _process(self, snap: ThinkSnapshot):
+        logger.debug(f"ThinkEngine: received snapshot | timestamp={snap.timestamp.isoformat()}")
         self._db.log_event(snap)
         features = self._db.build_feature_vector(self._db.last_row_id)
+        logger.debug(f"ThinkEngine: feature_vector_built | features={features}")
         danger_level = self._model.predict(features)
+        logger.info(
+            f"ThinkEngine: model_prediction | danger_level={danger_level}"
+        )
         action = self._lookup_action(danger_level)
+        logger.debug(f"ThinkEngine: action_mapped | action={action}")
         self._db.update_prediction(danger_level, action)
         self._state.danger_level = danger_level
         self._state.recommended_action = action
@@ -86,27 +114,28 @@ class ThinkEngine:
     # --- alignment ---
 
     def _align(self):
-        # Drop partials: misaligned snapshots are worse than no snapshot.
         sense_snap = None
         see_snap = None
 
-        if self._sense_enabled:
-            if self._state.sense_queue.empty():
-                return None
+        if not self._state.sense_queue.empty():
             sense_snap = self._state.sense_queue.get()
+            logger.debug(f"ThinkEngine: dequeued from sense_queue | timestamp={sense_snap.timestamp.isoformat()}")
 
-        if self._see_enabled:
-            if self._state.see_queue.empty():
-                return None
+        if not self._state.see_queue.empty():
             see_snap = self._state.see_queue.get()
+            logger.debug(f"ThinkEngine: dequeued from see_queue | timestamp={see_snap.timestamp.isoformat()}")
+
+        if sense_snap is None and see_snap is None:
+            return None
 
         if sense_snap and see_snap:
             gap_ms = abs((sense_snap.timestamp - see_snap.timestamp).total_seconds() * 1000)
             if gap_ms > self._max_gap_ms:
+                logger.warning(
+                    f"ThinkEngine: alignment_gap_exceeded | "
+                    f"gap_ms={gap_ms} | max={self._max_gap_ms}"
+                )
                 raise AlignmentError(f"Timestamp gap {gap_ms}ms exceeds max {self._max_gap_ms}ms")
-
-        if not sense_snap and not see_snap:
-            return None
 
         return ThinkSnapshot(
             timestamp=sense_snap.timestamp if sense_snap else see_snap.timestamp,
@@ -122,6 +151,7 @@ class ThinkEngine:
 
     def _load_model(self):
         active = self._active_model
+        logger.debug(f"ThinkEngine: loading model | active_model={active}")
         try:
             if active == "xgboost":
                 self._model = XGBoostModel(self._config)
@@ -132,7 +162,17 @@ class ThinkEngine:
             else:
                 raise ModelError(f"Unknown model type '{active}'. Available: xgboost")
             self._model.load(self._model_path)
-        except ModelError:
+            logger.info(f"ThinkEngine: model loaded successfully | type={active}")
+        except ModelError as e:
+            logger.error(
+                f"ThinkEngine: model loading failed - {type(e).__name__}: {e}",
+                exc_info=True
+            )
             raise
         except Exception as e:
-            raise ModelError(f"Failed to load model '{active}': {e}")
+            error_msg = f"Failed to load model '{active}': {e}"
+            logger.error(
+                f"ThinkEngine: model loading failed - {type(e).__name__}: {error_msg}",
+                exc_info=True
+            )
+            raise ModelError(error_msg)

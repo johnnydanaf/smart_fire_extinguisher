@@ -6,4 +6,12 @@ flask
 xgboost
 pyserial
 smbus2
+
+scikit-learn
+
 psycopg2-binary
+
+# Adafruit CircuitPython / I2C
+adafruit-blinka
+adafruit-circuitpython-ads1x15
+adafruit-circuitpython-amg88xx

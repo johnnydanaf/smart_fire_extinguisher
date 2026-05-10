@@ -2,10 +2,13 @@
 
 import os
 import time
+import logging
 import psycopg2
 import numpy as np
 from psycopg2.extras import RealDictCursor
 from exceptions import DatabaseError
+
+logger = logging.getLogger(__name__)
 
 
 class ThinkDatabase:
@@ -27,6 +30,7 @@ class ThinkDatabase:
         max_retries = 3
         for attempt in range(1, max_retries + 1):
             try:
+                logger.debug(f"Database: connect attempt {attempt}/{max_retries}")
                 self._connection = psycopg2.connect(
                     host=os.getenv("DB_HOST"),
                     port=os.getenv("DB_PORT"),
@@ -36,11 +40,20 @@ class ThinkDatabase:
                     cursor_factory=RealDictCursor
                 )
                 self._connected = True
+                logger.info("Database: connected successfully")
                 return
             except Exception as e:
                 self._connected = False
                 if attempt == max_retries:
-                    raise DatabaseError(f"Failed to connect after {max_retries} attempts: {e}")
+                    error_msg = f"Failed to connect after {max_retries} attempts: {e}"
+                    logger.error(
+                        f"Database: connection failed - {type(e).__name__}: {error_msg}",
+                        exc_info=True
+                    )
+                    raise DatabaseError(error_msg)
+                logger.warning(
+                    f"Database: connection attempt {attempt} failed - {type(e).__name__}: {e}. Retrying..."
+                )
                 time.sleep(1)
 
     @property
@@ -60,6 +73,7 @@ class ThinkDatabase:
 
     def log_event(self, snap) -> None:
         try:
+            logger.debug(f"Database: inserting event | timestamp={snap.timestamp.isoformat()}")
             with self._connection.cursor() as cur:
                 cur.execute("""
                     INSERT INTO think_schema (
@@ -81,12 +95,18 @@ class ThinkDatabase:
                 self._last_row_id = cur.fetchone()["id"]
             self._connection.commit()
             self._assign_event_id()
+            logger.info(f"Database: event_inserted | row_id={self._last_row_id}")
         except Exception as e:
             self._connection.rollback()
+            logger.error(
+                f"Database: failed to log event - {type(e).__name__}: {e}",
+                exc_info=True
+            )
             raise DatabaseError(f"Failed to log event: {e}")
 
     def _assign_event_id(self) -> None:
         try:
+            logger.debug(f"Database: assigning event_id | row_id={self._last_row_id}")
             with self._connection.cursor() as cur:
                 cur.execute("""
                     SELECT id, event_id, timestamp
@@ -102,6 +122,7 @@ class ThinkDatabase:
                     current = cur.fetchone()
                     gap_ms = abs(current["timestamp"] - prev["timestamp"]) * 1000
                     event_id = prev["event_id"] if gap_ms <= self._max_gap_ms else self._last_row_id
+                    logger.debug(f"Database: event_chain_gap | gap_ms={gap_ms} | max={self._max_gap_ms}")
                 else:
                     event_id = self._last_row_id
 
@@ -111,12 +132,20 @@ class ThinkDatabase:
             self._connection.commit()
         except Exception as e:
             self._connection.rollback()
+            logger.error(
+                f"Database: failed to assign event_id - {type(e).__name__}: {e}",
+                exc_info=True
+            )
             raise DatabaseError(f"Failed to assign event_id: {e}")
 
     def update_prediction(self, danger_level: int, action: str) -> None:
         danger_labels = {1: "MINIMAL", 2: "LOW", 3: "MODERATE", 4: "HIGH", 5: "CRITICAL"}
         danger_label = danger_labels.get(danger_level, "UNKNOWN")
         try:
+            logger.debug(
+                f"Database: updating prediction | row_id={self._last_row_id} | "
+                f"danger_level={danger_level} ({danger_label}) | action={action}"
+            )
             with self._connection.cursor() as cur:
                 cur.execute("""
                     UPDATE think_schema
@@ -128,10 +157,18 @@ class ThinkDatabase:
             self._connection.commit()
         except Exception as e:
             self._connection.rollback()
+            logger.error(
+                f"Database: failed to update prediction - {type(e).__name__}: {e}",
+                exc_info=True
+            )
             raise DatabaseError(f"Failed to update prediction: {e}")
 
     def update_human_label(self, true_danger: int, true_action: str = None) -> None:
         try:
+            logger.debug(
+                f"Database: updating human label | row_id={self._last_row_id} | "
+                f"true_danger={true_danger} | true_action={true_action}"
+            )
             with self._connection.cursor() as cur:
                 cur.execute("""
                     UPDATE think_schema
@@ -143,6 +180,10 @@ class ThinkDatabase:
             self._connection.commit()
         except Exception as e:
             self._connection.rollback()
+            logger.error(
+                f"Database: failed to update human label - {type(e).__name__}: {e}",
+                exc_info=True
+            )
             raise DatabaseError(f"Failed to update human label: {e}")
 
     # --- read operations ---
@@ -193,12 +234,14 @@ class ThinkDatabase:
         both live prediction and offline training (CSV export).
         Returns a flat dict[str, float] for XGBoost. Missing data → np.nan.
         """
+        logger.debug(f"Database: building feature vector | row_id={row_id}")
         try:
             # 1. Find this row's event_id
             with self._connection.cursor() as cur:
                 cur.execute("SELECT event_id FROM think_schema WHERE id = %s", (row_id,))
                 row = cur.fetchone()
                 if not row or row["event_id"] is None:
+                    logger.warning(f"Database: no event_id found for row_id={row_id}")
                     return {}
                 event_id = row["event_id"]
 
@@ -214,9 +257,14 @@ class ThinkDatabase:
                 """, (event_id, row_id, self._chain_length))
                 chain = cur.fetchall()
         except Exception as e:
+            logger.error(
+                f"Database: failed to fetch chain - {type(e).__name__}: {e}",
+                exc_info=True
+            )
             raise DatabaseError(f"Failed to fetch chain for feature vector: {e}")
 
         if not chain:
+            logger.debug(f"Database: empty chain for row_id={row_id}")
             return {}
 
         features = {}
